@@ -1,0 +1,30 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      AUTH_MODE: ${AUTH_MODE:-mock}
+      INVENTORY_PATH: /app/inventory.yaml
+      BASELINES_DIR: /app/baselines
+      AUDIT_LOG_PATH: /app/backend/audit/audit.log
+      CORS_ORIGINS: http://localhost:5173,http://localhost:3000,http://localhost
+    volumes:
+      - ./inventory.yaml:/app/inventory.yaml:ro
+      - ./baselines:/app/baselines:ro
+      - ./backend/audit:/app/backend/audit
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

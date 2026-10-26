@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(34, 211, 238, 0.08), transparent 60%),
+    radial-gradient(900px 500px at 90% 0%, rgba(34, 197, 94, 0.05), transparent 55%),
+    #0b1220;
+  font-family: "IBM Plex Sans", Segoe UI, system-ui, sans-serif;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+
+@layer components {
+  .noc-panel {
+    @apply rounded-xl border border-noc-border bg-noc-panel/90 shadow-panel backdrop-blur;
+  }
+
+  .noc-input {
+    @apply w-full rounded-lg border border-noc-border bg-slate-950/70 px-3 py-2 text-sm text-slate-100 outline-none ring-noc-accent/40 placeholder:text-slate-500 focus:ring-2;
+  }
+
+  .noc-btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500/90 px-3 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .noc-btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-noc-border bg-slate-900/60 px-3 py-2 text-sm font-medium text-slate-200 transition hover:border-cyan-500/40 hover:text-cyan-200 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+}

@@ -1,0 +1,129 @@
+# Network Operations Assistant — device inventory (read-only monitoring)
+# SSH uses the logged-in ENT user credentials from encrypted server RAM only.
+# Do not store user or shared switch passwords in this file.
+
+devices:
+  - hostname: sw-10-168-2-79
+    ip: 10.168.2.79
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-230-141
+    ip: 10.247.230.141
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-230-142
+    ip: 10.247.230.142
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-168-2-80
+    ip: 10.168.2.80
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-168-2-4
+    ip: 10.168.2.4
+    platform: cisco_nxos
+    enabled: true
+
+  - hostname: sw-10-168-2-3
+    ip: 10.168.2.3
+    platform: cisco_nxos
+    enabled: true
+
+  - hostname: sw-10-247-111-62
+    ip: 10.247.111.62
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-111-59
+    ip: 10.247.111.59
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-231-130
+    ip: 10.247.231.130
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-231-131
+    ip: 10.247.231.131
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-246-230-130
+    ip: 10.246.230.130
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-10
+    ip: 10.247.58.10
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-8
+    ip: 10.247.58.8
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-11
+    ip: 10.247.58.11
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-1
+    ip: 10.247.58.1
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-2
+    ip: 10.247.58.2
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-3
+    ip: 10.247.58.3
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-7
+    ip: 10.247.58.7
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-12
+    ip: 10.247.58.12
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-5
+    ip: 10.247.58.5
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-6
+    ip: 10.247.58.6
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-52
+    ip: 10.247.58.52
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-51
+    ip: 10.247.58.51
+    platform: cisco_ios
+    enabled: true
+
+  - hostname: sw-10-247-58-50
+    ip: 10.247.58.50
+    platform: cisco_nxos
+    enabled: true
+
+  - hostname: sw-10-247-58-53
+    ip: 10.247.58.53
+    platform: cisco_ios
+    enabled: true

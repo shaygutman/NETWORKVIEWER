@@ -1,7 +1,13 @@
 fastapi>=0.100.0
 uvicorn[standard]>=0.22.0
 pydantic>=2.0
+pydantic-settings>=2.0
 netmiko>=4.2.0
+# Paramiko 5 removed SHA-1 KEX (group1/group14-sha1) and ssh-rsa host keys.
+# Enterprise Catalyst/Nexus gear still requires those on the SSH *client* side.
+# Keep Paramiko 4.x so Netmiko can negotiate with legacy switch SSH stacks.
+# No switch-side SSH reconfiguration is required or performed.
+paramiko>=3.4,<5
 # Newest release that installs on Windows. Later releases have no Windows package
 # and try to compile with Zig 0.17, which is not available for Windows.
 scrapli==2026.2.20
@@ -10,6 +16,7 @@ scrapli==2026.2.20
 ldap3>=2.9.1
 pyyaml>=6.0
 python-jose[cryptography]>=3.3.0
+cryptography>=42.0.0
 passlib[bcrypt]>=1.7.4
 python-multipart>=0.0.6
 requests>=2.31.0
