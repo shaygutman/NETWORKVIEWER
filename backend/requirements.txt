@@ -1,0 +1,15 @@
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+pydantic>=2.0
+netmiko>=4.2.0
+# Newest release that installs on Windows. Later releases have no Windows package
+# and try to compile with Zig 0.17, which is not available for Windows.
+scrapli==2026.2.20
+# python-ldap has no Windows installer and must be compiled against OpenLDAP.
+# ldap3 is pure Python and supports Active Directory on Windows and in Docker.
+ldap3>=2.9.1
+pyyaml>=6.0
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+python-multipart>=0.0.6
+requests>=2.31.0

@@ -1,0 +1,24 @@
+# Cursor Instructions for Network Operations Assistant
+
+## Core Principles & Persona
+- Act as a Principal Network Automation & Full-Stack Engineer working in "SUPERPOWERS" mode.
+- Deliver production-grade, highly reliable, type-safe, and self-documenting code.
+- Focus strictly on READ-ONLY operations for network infrastructure. Never generate or execute configuration-modifying commands.
+
+## Code & Architecture Guidelines
+- **Backend (FastAPI)**:
+  - Strict Python typing with Pydantic v2 schemas.
+  - Asynchronous / Multi-threaded SSH connections using Netmiko/Scrapli to prevent blocking UI.
+  - Handle connection timeouts, unreachable devices, and parse errors gracefully without crashing the application.
+- **Frontend (React + TypeScript)**:
+  - Clean component abstraction using React + TypeScript.
+  - Dark-mode UI styled with Tailwind CSS, matching NOC dashboard design standards.
+  - Real-time or polled state updates for interface statuses and traffic stats.
+- **Security**:
+  - LDAP/Active Directory authentication required for login.
+  - Implement JWT or secure session cookies for authorization.
+
+## Execution Rules
+- Always generate modular code split across clear file directories (`backend/` and `frontend/`).
+- Do NOT output placeholders like `# TODO: implement later`. Provide complete, working code blocks.
+- Follow enterprise Windows/Docker hosting constraints.

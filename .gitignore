@@ -1,0 +1,23 @@
+# Python & Virtual environment
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Frontend dependencies & builds
+frontend/node_modules/
+frontend/build/
+frontend/dist/
+
+# Environment & Credentials
+.env
+.env.local
+*.log
+
+# Docker
+.docker/
+
+# IDE / Cursor
+.vscode/
+.idea/
+*.swp
