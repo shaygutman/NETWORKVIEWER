@@ -25,7 +25,21 @@ function BoolPill({ label, value }: { label: string; value: boolean | null | und
   );
 }
 
+function switchIp(data: SwitchOverview): string {
+  return data.ip_address || data.ip;
+}
+
+/** Prefer live device hostname; fall back to inventory id. */
+function displayHostname(data: SwitchOverview): string {
+  const live = (data.device_hostname || "").trim();
+  return live || data.hostname;
+}
+
 export function SwitchCard({ switchData, selected, onSelect }: SwitchCardProps) {
+  const ip = switchIp(switchData);
+  const sysName = displayHostname(switchData);
+  const inventoryId = switchData.hostname;
+
   return (
     <button
       type="button"
@@ -35,18 +49,30 @@ export function SwitchCard({ switchData, selected, onSelect }: SwitchCardProps) 
       }`}
     >
       <div className="flex items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span
-              className={`h-2.5 w-2.5 rounded-full ${
+              className={`h-2.5 w-2.5 shrink-0 rounded-full ${
                 switchData.reachable ? "bg-noc-good shadow-[0_0_8px_rgba(34,197,94,0.7)]" : "bg-noc-bad"
               }`}
             />
-            <h3 className="font-semibold text-white">{switchData.hostname}</h3>
+            <h3 className="truncate font-semibold text-white" title={`${sysName} (${ip})`}>
+              {sysName}
+              <span className="ml-2 font-mono text-sm font-normal text-cyan-300/90">({ip})</span>
+            </h3>
           </div>
-          <p className="mt-1 font-mono text-xs text-slate-400">{switchData.ip}</p>
+          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-xs text-slate-400">
+            {sysName !== inventoryId ? (
+              <>
+                <span className="text-slate-500">inventory</span>
+                <span>{inventoryId}</span>
+                <span className="text-slate-600">·</span>
+              </>
+            ) : null}
+            <span className="text-cyan-300/80">{ip}</span>
+          </p>
         </div>
-        <span className="rounded-md bg-slate-900 px-2 py-1 text-[10px] uppercase tracking-wide text-slate-400">
+        <span className="shrink-0 rounded-md bg-slate-900 px-2 py-1 text-[10px] uppercase tracking-wide text-slate-400">
           {switchData.platform.replace("cisco_", "")}
         </span>
       </div>

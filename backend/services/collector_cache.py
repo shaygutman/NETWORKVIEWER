@@ -99,6 +99,7 @@ class CollectorCache:
                             "interfaces",
                             "recommended_commands",
                             "stale_port_days_threshold",
+                            "ip_address",
                         }
                     )
                 )
@@ -162,7 +163,12 @@ class CollectorCache:
         # Keep fleet overview in sync with the freshest detail snapshot.
         overview = SwitchOverview(
             **value.model_dump(
-                exclude={"interfaces", "recommended_commands", "stale_port_days_threshold"}
+                exclude={
+                    "interfaces",
+                    "recommended_commands",
+                    "stale_port_days_threshold",
+                    "ip_address",
+                }
             )
         )
         self._set(self._overviews, hostname, overview, ttl_seconds)

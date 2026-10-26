@@ -214,7 +214,12 @@ def save_detail_snapshot(detail: SwitchDetail) -> None:
     collected = detail.last_collected_at or now
     overview = SwitchOverview(
         **detail.model_dump(
-            exclude={"interfaces", "recommended_commands", "stale_port_days_threshold"}
+            exclude={
+                "interfaces",
+                "recommended_commands",
+                "stale_port_days_threshold",
+                "ip_address",
+            }
         )
     )
     with _lock:

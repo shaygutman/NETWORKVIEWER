@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 
 class PlatformType(str, Enum):
@@ -72,6 +72,12 @@ class DeviceSummary(BaseModel):
     reachable: bool | None = None
     last_error: str | None = None
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def ip_address(self) -> str:
+        """Explicit IP alias for UI clients (same value as ``ip``)."""
+        return self.ip
+
 
 class InterfaceStatus(BaseModel):
     port: str
@@ -135,6 +141,8 @@ class SwitchOverview(BaseModel):
     ip: str
     platform: PlatformType
     reachable: bool
+    # Real device hostname from ``show hostname`` / ``show version`` (not inventory id).
+    device_hostname: str | None = None
     last_collected_at: datetime | None = None
     uptime: str | None = None
     model: str | None = None
@@ -155,6 +163,12 @@ class SwitchOverview(BaseModel):
     stale_port_count: int = 0
     health_warning_count: int = 0
     error: str | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def ip_address(self) -> str:
+        """Explicit IP alias for UI clients (same value as ``ip``)."""
+        return self.ip
 
 
 class SwitchDetail(SwitchOverview):

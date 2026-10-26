@@ -379,7 +379,19 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                 <div className="space-y-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
-                      <h2 className="text-xl font-semibold text-white">{detail.hostname}</h2>
+                      <h2 className="text-xl font-semibold text-white">
+                        {(detail.device_hostname || "").trim() || detail.hostname}
+                        <span className="ml-2 font-mono text-lg font-normal text-cyan-300/90">
+                          ({detail.ip_address || detail.ip})
+                        </span>
+                      </h2>
+                      <p className="mt-1 font-mono text-xs text-slate-400">
+                        {(detail.device_hostname || "").trim() &&
+                        (detail.device_hostname || "").trim() !== detail.hostname
+                          ? `inventory ${detail.hostname} · `
+                          : null}
+                        {detail.ip_address || detail.ip}
+                      </p>
                       <p className="mt-1 text-sm text-noc-muted">
                         {detail.model || "Unknown model"} · {detail.firmware || "Unknown firmware"}
                         {detail.system_mac ? ` · MAC ${detail.system_mac}` : ""}

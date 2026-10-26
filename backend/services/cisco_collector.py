@@ -442,7 +442,7 @@ def collect_switch_detail(
         device, device_credentials, cfg
     )
     detail = SwitchDetail(
-        **overview.model_dump(),
+        **overview.model_dump(exclude={"ip_address"}),
         interfaces=interfaces,
         recommended_commands=RECOMMENDED_COMMANDS["switch"],
         stale_port_days_threshold=cfg.stale_port_days,
@@ -481,7 +481,7 @@ def collect_switch_overview(
     # Warm the detail cache when we already pulled interfaces in the same session.
     if overview.reachable:
         detail = SwitchDetail(
-            **overview.model_dump(),
+            **overview.model_dump(exclude={"ip_address"}),
             interfaces=interfaces,
             recommended_commands=RECOMMENDED_COMMANDS["switch"],
             stale_port_days_threshold=cfg.stale_port_days,
@@ -560,6 +560,7 @@ def _live_collect_overview_and_interfaces(
         )
         # All of these are read-only show commands — never configure anything.
         follow_up = [
+            "show hostname",
             status_cmd,
             "show vlan brief",
             switchport_cmd,
@@ -577,6 +578,11 @@ def _live_collect_overview_and_interfaces(
         raw: dict[str, str] = {}
         for command in follow_up:
             raw[command] = _send_command(connection, command, cfg, device.hostname)
+
+        device_hostname = _extract_device_hostname(
+            raw.get("show hostname", ""),
+            version_text,
+        )
 
         iface_text, interfaces = _resolve_interfaces_on_connection(
             connection,
@@ -677,6 +683,7 @@ def _live_collect_overview_and_interfaces(
             ip=device.ip,
             platform=platform,
             reachable=True,
+            device_hostname=device_hostname,
             last_collected_at=datetime.now(timezone.utc),
             uptime=_extract_uptime(version_text),
             model=model,
@@ -890,7 +897,7 @@ def probe_switch_connectivity(
     )
     if overview.reachable:
         detail = SwitchDetail(
-            **overview.model_dump(),
+            **overview.model_dump(exclude={"ip_address"}),
             interfaces=interfaces,
             recommended_commands=RECOMMENDED_COMMANDS["switch"],
             stale_port_days_threshold=cfg.stale_port_days,
@@ -2082,6 +2089,42 @@ def _map_port_status(raw: str) -> PortOperationalStatus:
     }:
         return PortOperationalStatus.DOWN
     return PortOperationalStatus.UNKNOWN
+
+
+def _extract_device_hostname(hostname_text: str, version_text: str = "") -> str | None:
+    """Parse the switch's configured hostname from ``show hostname`` / ``show version``."""
+    text = normalize_cli_text(hostname_text or "")
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lower = line.lower()
+        if lower.startswith("%") or "invalid" in lower or "incomplete" in lower:
+            continue
+        if lower.startswith("hostname"):
+            # e.g. "hostname eyok2-01sr-swc-01" (rare) or "Hostname: foo"
+            parts = re.split(r"[:\s]+", line, maxsplit=1)
+            if len(parts) >= 2 and parts[1].strip():
+                line = parts[1].strip()
+            else:
+                continue
+        # Drop prompt markers / trailing junk; take first token.
+        token = line.split()[0].rstrip("#>")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,63}", token):
+            return token
+
+    version = normalize_cli_text(version_text or "")
+    for pattern in (
+        r"(?im)^\s*Device\s+name\s*:\s*(\S+)",
+        r"(?im)^\s*hostname\s*:\s*(\S+)",
+        r"(?im)^\s*System\s+name\s*:\s*(\S+)",
+    ):
+        match = re.search(pattern, version)
+        if match:
+            token = match.group(1).strip().rstrip("#>")
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,63}", token):
+                return token
+    return None
 
 
 def _extract_uptime(version_text: str) -> str | None:

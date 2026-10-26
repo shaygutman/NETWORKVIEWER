@@ -20,6 +20,8 @@ export interface AuthToken {
 export interface DeviceSummary {
   hostname: string;
   ip: string;
+  /** Explicit IP alias from API (same value as ``ip``). */
+  ip_address?: string;
   platform: PlatformType;
   site?: string | null;
   role?: string | null;
@@ -73,6 +75,10 @@ export interface PortDetail {
 export interface SwitchOverview {
   hostname: string;
   ip: string;
+  /** Explicit IP alias from API (same value as ``ip``). */
+  ip_address?: string;
+  /** Real switch hostname from ``show hostname`` (e.g. eyok2-01sr-swc-01). */
+  device_hostname?: string | null;
   platform: PlatformType;
   reachable: boolean;
   last_collected_at?: string | null;
