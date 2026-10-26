@@ -43,29 +43,43 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     [overviews],
   );
 
-  const refreshFleet = useCallback(async () => {
+  /** force=true bypasses backend TTL cache (manual Refresh / auto-refresh). */
+  const refreshFleet = useCallback(async (force = false) => {
     setLoadingFleet(true);
     setError(null);
     try {
-      const [deviceList, overviewList] = await Promise.all([api.listDevices(), api.overview()]);
+      const [deviceList, overviewList] = await Promise.all([
+        api.listDevices(),
+        api.overview(force),
+      ]);
       setDevices(deviceList);
       setOverviews(overviewList);
       setLastSync(new Date());
       if (overviewList.length > 0) {
         setSelectedHost((prev) => prev ?? overviewList[0].hostname);
       }
+      // After a forced fleet collect, detail cache is warm — reload selected host from cache.
+      if (force && selectedHost) {
+        try {
+          const data = await api.deviceDetail(selectedHost, false);
+          setDetail(data);
+        } catch {
+          /* detail panel will show prior error state if needed */
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to refresh fleet");
     } finally {
       setLoadingFleet(false);
     }
-  }, []);
+  }, [selectedHost]);
 
-  const loadDetail = useCallback(async (hostname: string) => {
+  /** Cached by default; pass force=true only when explicitly re-collecting. */
+  const loadDetail = useCallback(async (hostname: string, force = false) => {
     setLoadingDetail(true);
     setProbeResult(null);
     try {
-      const data = await api.deviceDetail(hostname);
+      const data = await api.deviceDetail(hostname, force);
       setDetail(data);
     } catch (err) {
       setDetail(null);
@@ -81,10 +95,26 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     try {
       const result = await api.probeDevice(hostname);
       setProbeResult(result);
-      if (result.reachable) {
-        // Refresh the detail panel from the same session-backed collection path.
-        await loadDetail(hostname);
-      }
+      // Probe already did a live collect and refreshed the cache — serve cache.
+      await loadDetail(hostname, false);
+      // Keep fleet card in sync with probe outcome.
+      setOverviews((prev) =>
+        prev.map((item) =>
+          item.hostname === hostname
+            ? {
+                ...item,
+                reachable: result.reachable,
+                model: result.model ?? item.model,
+                firmware: result.firmware ?? item.firmware,
+                interface_count: result.interface_count,
+                interfaces_up: result.interfaces_up,
+                interfaces_down: result.interfaces_down,
+                error: result.error ?? null,
+                last_collected_at: result.collected_at ?? item.last_collected_at,
+              }
+            : item,
+        ),
+      );
     } catch (err) {
       setProbeResult(null);
       setError(err instanceof Error ? err.message : "SSH probe failed");
@@ -94,19 +124,21 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   }, [loadDetail]);
 
   useEffect(() => {
-    void refreshFleet();
-  }, [refreshFleet]);
+    // First paint: prefer cache; live SSH only on cold miss.
+    void refreshFleet(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only initial load
+  }, []);
 
   useEffect(() => {
     if (selectedHost) {
-      void loadDetail(selectedHost);
+      void loadDetail(selectedHost, false);
     }
   }, [selectedHost, loadDetail]);
 
   useEffect(() => {
     if (!autoRefresh) return;
     const timer = window.setInterval(() => {
-      void refreshFleet();
+      void refreshFleet(true);
     }, 60000);
     return () => window.clearInterval(timer);
   }, [autoRefresh, refreshFleet]);
@@ -181,7 +213,12 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
               />
               Auto-refresh
             </label>
-            <button className="noc-btn-ghost" onClick={() => void refreshFleet()} disabled={loadingFleet}>
+            <button
+              className="noc-btn-ghost"
+              onClick={() => void refreshFleet(true)}
+              disabled={loadingFleet}
+              title="Force live SSH collection (bypasses cache)"
+            >
               {loadingFleet ? "Refreshing…" : "Refresh"}
             </button>
             <span className="rounded-lg border border-noc-border px-3 py-2 text-xs text-slate-300">

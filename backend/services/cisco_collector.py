@@ -32,6 +32,7 @@ from backend.models.schemas import (
     SwitchDetail,
     SwitchOverview,
 )
+from backend.services.collector_cache import collector_cache
 from backend.services.inventory import load_inventory
 
 logger = logging.getLogger(__name__)
@@ -223,34 +224,62 @@ class CollectorError(Exception):
 def collect_all_overviews(
     device_credentials: DeviceCredentials,
     settings: Settings | None = None,
+    *,
+    force_refresh: bool = False,
 ) -> list[SwitchOverview]:
-    """Collect summary data from every enabled inventory device concurrently."""
+    """Collect summary data from every enabled inventory device concurrently.
+
+    Cached overviews are returned immediately unless ``force_refresh`` is set
+    (manual Refresh). Uncached / expired devices are queried in parallel via
+    a thread pool — never sequentially.
+    """
     cfg = settings or get_settings()
     devices = load_inventory()
     if not devices:
         return []
 
     results: list[SwitchOverview] = []
-    with ThreadPoolExecutor(max_workers=cfg.collector_max_workers) as pool:
-        futures = {
-            pool.submit(collect_switch_overview, device, device_credentials, cfg): device
-            for device in devices
-        }
-        for future in as_completed(futures):
-            device = futures[future]
-            try:
-                results.append(future.result())
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Unexpected collector failure for %s", device.hostname)
-                results.append(
-                    SwitchOverview(
-                        hostname=device.hostname,
-                        ip=device.ip,
-                        platform=device.platform,
-                        reachable=False,
-                        error=str(exc),
+    to_fetch: list[DeviceInventoryItem] = []
+
+    if force_refresh:
+        to_fetch = list(devices)
+    else:
+        for device in devices:
+            cached = collector_cache.get_overview(device.hostname)
+            if cached is not None:
+                results.append(cached)
+            else:
+                to_fetch.append(device)
+
+    if to_fetch:
+        workers = max(1, min(cfg.collector_max_workers, len(to_fetch)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    collect_switch_overview,
+                    device,
+                    device_credentials,
+                    cfg,
+                    force_refresh=True,
+                ): device
+                for device in to_fetch
+            }
+            for future in as_completed(futures):
+                device = futures[future]
+                try:
+                    results.append(future.result())
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Unexpected collector failure for %s", device.hostname)
+                    results.append(
+                        SwitchOverview(
+                            hostname=device.hostname,
+                            ip=device.ip,
+                            platform=device.platform,
+                            reachable=False,
+                            error=str(exc),
+                        )
                     )
-                )
+
     results.sort(key=lambda item: item.hostname.lower())
     return results
 
@@ -259,132 +288,212 @@ def collect_switch_detail(
     hostname: str,
     device_credentials: DeviceCredentials,
     settings: Settings | None = None,
+    *,
+    force_refresh: bool = False,
 ) -> SwitchDetail:
+    """Return switch detail + interfaces, preferring the short-lived TTL cache."""
     cfg = settings or get_settings()
     device = _require_device(hostname)
-    overview = collect_switch_overview(device, device_credentials, cfg)
-    interfaces = (
-        _collect_port_details(device, device_credentials, cfg, overview.platform)
-        if overview.reachable
-        else []
+
+    if not force_refresh:
+        cached = collector_cache.get_detail(device.hostname)
+        if cached is not None:
+            logger.debug("Cache hit for switch detail %s", device.hostname)
+            return cached
+
+    overview, interfaces = _live_collect_overview_and_interfaces(
+        device, device_credentials, cfg
     )
-    return SwitchDetail(
+    detail = SwitchDetail(
         **overview.model_dump(),
         interfaces=interfaces,
         recommended_commands=RECOMMENDED_COMMANDS["switch"],
     )
+    collector_cache.set_detail(device.hostname, detail, cfg.collector_cache_ttl_seconds)
+    return detail
 
 
 def collect_switch_overview(
     device: DeviceInventoryItem,
     device_credentials: DeviceCredentials,
     settings: Settings | None = None,
+    *,
+    force_refresh: bool = False,
 ) -> SwitchOverview:
+    """Collect (or return cached) overview for one inventory device."""
     cfg = settings or get_settings()
+
+    if not force_refresh:
+        cached = collector_cache.get_overview(device.hostname)
+        if cached is not None:
+            logger.debug("Cache hit for switch overview %s", device.hostname)
+            return cached
+
+    overview, interfaces = _live_collect_overview_and_interfaces(
+        device, device_credentials, cfg
+    )
+    # Warm the detail cache when we already pulled interfaces in the same session.
+    if overview.reachable:
+        detail = SwitchDetail(
+            **overview.model_dump(),
+            interfaces=interfaces,
+            recommended_commands=RECOMMENDED_COMMANDS["switch"],
+        )
+        collector_cache.set_detail(device.hostname, detail, cfg.collector_cache_ttl_seconds)
+    else:
+        collector_cache.set_overview(
+            device.hostname, overview, cfg.collector_cache_ttl_seconds
+        )
+    return overview
+
+
+def _live_collect_overview_and_interfaces(
+    device: DeviceInventoryItem,
+    device_credentials: DeviceCredentials,
+    cfg: Settings,
+) -> tuple[SwitchOverview, list[PortDetail]]:
+    """
+    Live read-only collection for one switch using a single SSH session.
+
+    Opens one Netmiko connection, runs show commands, disconnects. Never sends
+    configuration commands. Used to populate the TTL cache on miss / refresh.
+    """
+    connection = None
+    params: dict[str, Any] = {}
     try:
-        # Always start with show version so we can correct a mis-labeled platform
-        # (e.g. Nexus inventoried as cisco_ios) before issuing OS-specific commands.
-        version_raw = _run_commands(
-            device,
-            ["show version"],
+        # First connect with inventory platform; may reconnect once if NX-OS/IOS
+        # auto-detect disagrees (still read-only, still client-side only).
+        params = _device_params(device, cfg, device_credentials)
+        connection = ConnectHandler(**params)
+
+        version_text = _send_command(connection, "show version", cfg, device.hostname)
+        if _is_cli_error(version_text) or not version_text.strip():
+            _log_raw_failure(device.hostname, "show version", version_text, "empty or CLI error")
+            overview = SwitchOverview(
+                hostname=device.hostname,
+                ip=device.ip,
+                platform=device.platform,
+                reachable=False,
+                error="show version failed or returned unusable output",
+            )
+            return overview, []
+
+        platform = detect_platform(version_text, device.platform)
+        if platform != device.platform:
+            logger.info(
+                "Platform auto-detect for %s (%s): inventory=%s detected=%s",
+                device.hostname,
+                device.ip,
+                device.platform.value,
+                platform.value,
+            )
+            # Reconnect with the correct Netmiko device_type for paging/prompts.
+            try:
+                connection.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            connection = None
+            params = _device_params(
+                device,
+                cfg,
+                device_credentials,
+                device_type_override=_netmiko_device_type(platform),
+            )
+            connection = ConnectHandler(**params)
+            # Re-fetch version on the corrected session (cheap, keeps parsers consistent).
+            version_text = _send_command(connection, "show version", cfg, device.hostname) or version_text
+
+        status_cmd = _iface_status_cmd(platform)
+        cpu_cmd = _cpu_cmd(platform)
+        mtu_cmd = _mtu_cmd(platform)
+        follow_up = [
+            status_cmd,
+            cpu_cmd,
+            "show ip dhcp snooping",
+            "show ip igmp snooping",
+            mtu_cmd,
+        ]
+        raw: dict[str, str] = {}
+        for command in follow_up:
+            raw[command] = _send_command(connection, command, cfg, device.hostname)
+
+        iface_text, interfaces = _resolve_interfaces_on_connection(
+            connection,
             cfg,
-            device_credentials,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return SwitchOverview(
-            hostname=device.hostname,
-            ip=device.ip,
-            platform=device.platform,
-            reachable=False,
-            error=_friendly_error(exc),
-        )
-
-    version_text = version_raw.get("show version", "")
-    if _is_cli_error(version_text) or not version_text.strip():
-        _log_raw_failure(device.hostname, "show version", version_text, "empty or CLI error")
-        return SwitchOverview(
-            hostname=device.hostname,
-            ip=device.ip,
-            platform=device.platform,
-            reachable=False,
-            error="show version failed or returned unusable output",
-        )
-
-    platform = detect_platform(version_text, device.platform)
-    if platform != device.platform:
-        logger.info(
-            "Platform auto-detect for %s (%s): inventory=%s detected=%s",
             device.hostname,
-            device.ip,
-            device.platform.value,
-            platform.value,
+            platform,
+            raw.get(status_cmd, ""),
         )
+        up_count = sum(1 for i in interfaces if i.status == PortOperationalStatus.UP)
+        down_count = len(interfaces) - up_count
 
-    try:
-        raw = _run_commands(
-            device,
-            [
-                _iface_status_cmd(platform),
-                _cpu_cmd(platform),
-                "show ip dhcp snooping",
-                "show ip igmp snooping",
-                _mtu_cmd(platform),
-            ],
-            cfg,
-            device_credentials,
-            device_type_override=_netmiko_device_type(platform),
-        )
-    except Exception as exc:  # noqa: BLE001
-        return SwitchOverview(
+        model = _extract_model(version_text)
+        if not model:
+            _log_raw_failure(
+                device.hostname, "show version", version_text, "model parse returned None"
+            )
+        if not interfaces:
+            _log_raw_failure(
+                device.hostname,
+                "interface status / ip interface brief",
+                iface_text,
+                "no interfaces parsed",
+            )
+
+        overview = SwitchOverview(
             hostname=device.hostname,
             ip=device.ip,
             platform=platform,
-            reachable=False,
-            error=_friendly_error(exc),
+            reachable=True,
+            last_collected_at=datetime.now(timezone.utc),
+            uptime=_extract_uptime(version_text),
+            model=model,
+            firmware=_extract_firmware(version_text),
+            system_mac=_extract_system_mac(version_text),
+            dhcp_snooping=_detect_enabled(
+                raw.get("show ip dhcp snooping", ""), "dhcp snooping is enabled"
+            ),
+            igmp_snooping=_detect_igmp(raw.get("show ip igmp snooping", "")),
+            jumbo_frames=_detect_jumbo(raw.get(mtu_cmd, "")),
+            cpu_percent=_extract_cpu(raw.get(cpu_cmd, "")),
+            interface_count=len(interfaces),
+            interfaces_up=up_count,
+            interfaces_down=down_count,
+            error=None,
         )
-
-    iface_text, interfaces = _resolve_interfaces(
-        device,
-        device_credentials,
-        cfg,
-        platform,
-        raw.get(_iface_status_cmd(platform), ""),
-        device_type_override=_netmiko_device_type(platform),
-    )
-    up_count = sum(1 for i in interfaces if i.status == PortOperationalStatus.UP)
-    down_count = len(interfaces) - up_count
-
-    model = _extract_model(version_text)
-    if not model:
-        _log_raw_failure(device.hostname, "show version", version_text, "model parse returned None")
-
-    if not interfaces:
-        _log_raw_failure(
-            device.hostname,
-            "interface status / ip interface brief",
-            iface_text,
-            "no interfaces parsed",
+        port_details = [
+            PortDetail(
+                port=iface.port,
+                status=iface.status,
+                vlan=iface.vlan,
+                duplex=iface.duplex,
+                speed=iface.speed,
+                type=iface.type,
+                description=iface.description,
+                trust_level=iface.trust_level,
+            )
+            for iface in interfaces
+        ]
+        return overview, port_details
+    except Exception as exc:  # noqa: BLE001
+        return (
+            SwitchOverview(
+                hostname=device.hostname,
+                ip=device.ip,
+                platform=device.platform,
+                reachable=False,
+                error=_friendly_error(exc),
+            ),
+            [],
         )
-
-    return SwitchOverview(
-        hostname=device.hostname,
-        ip=device.ip,
-        platform=platform,
-        reachable=True,
-        last_collected_at=datetime.now(timezone.utc),
-        uptime=_extract_uptime(version_text),
-        model=model,
-        firmware=_extract_firmware(version_text),
-        system_mac=_extract_system_mac(version_text),
-        dhcp_snooping=_detect_enabled(raw.get("show ip dhcp snooping", ""), "dhcp snooping is enabled"),
-        igmp_snooping=_detect_igmp(raw.get("show ip igmp snooping", "")),
-        jumbo_frames=_detect_jumbo(raw.get(_mtu_cmd(platform), "")),
-        cpu_percent=_extract_cpu(raw.get(_cpu_cmd(platform), "")),
-        interface_count=len(interfaces),
-        interfaces_up=up_count,
-        interfaces_down=down_count,
-        error=None,
-    )
+    finally:
+        if "password" in params:
+            params["password"] = ""
+        if connection is not None:
+            try:
+                connection.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def lookup_mac_across_inventory(
@@ -451,19 +560,28 @@ def probe_switch_connectivity(
     """
     Live read-only connectivity probe using the caller's session credentials.
 
-    Performs the same overview collection path as the UI detail view so model,
-    firmware, and interface counts are validated without any env-var secrets.
+    Always bypasses the TTL cache (Test SSH). Performs a single-session live
+    collect so model, firmware, and interface counts are validated without any
+    env-var secrets, then refreshes the cache with the fresh snapshot.
     """
     cfg = settings or get_settings()
     device = _require_device(hostname)
     ssh_user = _require_session_credentials(device_credentials).username
 
-    overview = collect_switch_overview(device, device_credentials, cfg)
-    # Detail interfaces when reachable so the probe mirrors the UI port table.
-    interfaces: list[PortDetail] = []
+    collector_cache.invalidate(device.hostname)
+    overview, interfaces = _live_collect_overview_and_interfaces(
+        device, device_credentials, cfg
+    )
     if overview.reachable:
-        interfaces = _collect_port_details(
-            device, device_credentials, cfg, overview.platform
+        detail = SwitchDetail(
+            **overview.model_dump(),
+            interfaces=interfaces,
+            recommended_commands=RECOMMENDED_COMMANDS["switch"],
+        )
+        collector_cache.set_detail(device.hostname, detail, cfg.collector_cache_ttl_seconds)
+    else:
+        collector_cache.set_overview(
+            device.hostname, overview, cfg.collector_cache_ttl_seconds
         )
 
     iface_count = len(interfaces) if interfaces else overview.interface_count
@@ -584,6 +702,38 @@ def _device_params(
     }
 
 
+def _send_command(connection: Any, command: str, cfg: Settings, hostname: str) -> str:
+    """Send one read-only show/ping command on an open Netmiko session."""
+    if not _is_read_only(command):
+        logger.warning("Blocked non-read-only command: %s", command)
+        return ""
+    try:
+        raw_out = connection.send_command(
+            command,
+            read_timeout=cfg.ssh_timeout,
+            use_textfsm=False,
+        )
+        text = normalize_cli_text(str(raw_out or ""))
+        if _is_cli_error(text):
+            _log_raw_failure(hostname, command, text, "CLI reported an error")
+        return text
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Command failed on %s (%s): %s — %s",
+            hostname,
+            command,
+            exc.__class__.__name__,
+            exc,
+        )
+        _log_raw_failure(
+            hostname,
+            command,
+            "",
+            f"exception during send_command: {exc.__class__.__name__}: {exc}",
+        )
+        return ""
+
+
 def _run_commands(
     device: DeviceInventoryItem,
     commands: list[str],
@@ -597,40 +747,7 @@ def _run_commands(
     try:
         connection = ConnectHandler(**params)
         for command in commands:
-            if not _is_read_only(command):
-                logger.warning("Blocked non-read-only command: %s", command)
-                outputs[command] = ""
-                continue
-            try:
-                raw_out = connection.send_command(
-                    command,
-                    read_timeout=cfg.ssh_timeout,
-                    use_textfsm=False,
-                )
-                text = normalize_cli_text(str(raw_out or ""))
-                outputs[command] = text
-                if _is_cli_error(text):
-                    _log_raw_failure(
-                        device.hostname,
-                        command,
-                        text,
-                        "CLI reported an error",
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Command failed on %s (%s): %s — %s",
-                    device.hostname,
-                    command,
-                    exc.__class__.__name__,
-                    exc,
-                )
-                outputs[command] = ""
-                _log_raw_failure(
-                    device.hostname,
-                    command,
-                    "",
-                    f"exception during send_command: {exc.__class__.__name__}: {exc}",
-                )
+            outputs[command] = _send_command(connection, command, cfg, device.hostname)
         return outputs
     finally:
         # Scrub password from the local params dict; never log it
@@ -689,53 +806,14 @@ def _lookup_mac_on_device(
     ]
 
 
-def _collect_port_details(
-    device: DeviceInventoryItem,
-    device_credentials: DeviceCredentials,
+def _resolve_interfaces_on_connection(
+    connection: Any,
     cfg: Settings,
-    platform: PlatformType | None = None,
-) -> list[PortDetail]:
-    effective = platform or device.platform
-    status_cmd = _iface_status_cmd(effective)
-    raw = _run_commands(
-        device,
-        [status_cmd],
-        cfg,
-        device_credentials,
-        device_type_override=_netmiko_device_type(effective),
-    )
-    _, interfaces = _resolve_interfaces(
-        device,
-        device_credentials,
-        cfg,
-        effective,
-        raw.get(status_cmd, ""),
-        device_type_override=_netmiko_device_type(effective),
-    )
-    return [
-        PortDetail(
-            port=iface.port,
-            status=iface.status,
-            vlan=iface.vlan,
-            duplex=iface.duplex,
-            speed=iface.speed,
-            type=iface.type,
-            description=iface.description,
-            trust_level=iface.trust_level,
-        )
-        for iface in interfaces
-    ]
-
-
-def _resolve_interfaces(
-    device: DeviceInventoryItem,
-    device_credentials: DeviceCredentials,
-    cfg: Settings,
+    hostname: str,
     platform: PlatformType,
     primary_text: str,
-    device_type_override: str | None = None,
 ) -> tuple[str, list[InterfaceStatus]]:
-    """Parse interface status with OS command fallbacks and ip brief last resort."""
+    """Parse interface status with OS command fallbacks on the open SSH session."""
     candidates: list[tuple[str, str]] = []
     primary_cmd = _iface_status_cmd(platform)
     alternate_cmd = (
@@ -752,17 +830,10 @@ def _resolve_interfaces(
     if _is_cli_error(primary_text) or not primary_text.strip() or not interfaces:
         logger.info(
             "Primary interface status failed on %s — trying alternate command %r",
-            device.hostname,
+            hostname,
             alternate_cmd,
         )
-        alt_raw = _run_commands(
-            device,
-            [alternate_cmd],
-            cfg,
-            device_credentials,
-            device_type_override=device_type_override,
-        )
-        alt_text = alt_raw.get(alternate_cmd, "")
+        alt_text = _send_command(connection, alternate_cmd, cfg, hostname)
         candidates.append((alternate_cmd, alt_text))
         interfaces = parse_interface_status(alt_text)
         if interfaces:
@@ -770,21 +841,13 @@ def _resolve_interfaces(
 
     # Last resort: show ip interface brief (both IOS and NX-OS accept this).
     brief_cmd = "show ip interface brief"
-    logger.info("Falling back to %r on %s", brief_cmd, device.hostname)
-    brief_raw = _run_commands(
-        device,
-        [brief_cmd],
-        cfg,
-        device_credentials,
-        device_type_override=device_type_override,
-    )
-    brief_text = brief_raw.get(brief_cmd, "")
+    logger.info("Falling back to %r on %s", brief_cmd, hostname)
+    brief_text = _send_command(connection, brief_cmd, cfg, hostname)
     candidates.append((brief_cmd, brief_text))
     interfaces = parse_ip_interface_brief(brief_text)
     if interfaces:
         return brief_text, interfaces
 
-    # Return the most informative raw blob for logging.
     for _cmd, text in reversed(candidates):
         if text.strip():
             return text, []

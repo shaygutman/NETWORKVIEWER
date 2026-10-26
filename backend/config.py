@@ -58,10 +58,13 @@ class Settings(BaseSettings):
     mock_username: str = Field(default="admin")
     mock_password: str = Field(default="admin")
 
-    # SSH / collector
-    ssh_timeout: int = 20
-    ssh_conn_timeout: int = 10
+    # SSH / collector (client-side only — never modifies switch config)
+    # Keep conn/read timeouts short so offline devices fail fast.
+    ssh_timeout: int = 5
+    ssh_conn_timeout: int = 3
     collector_max_workers: int = 8
+    # In-memory TTL for overview / detail / interface snapshots (seconds).
+    collector_cache_ttl_seconds: int = 300
 
     # CORS
     cors_origins: str = Field(

@@ -47,28 +47,45 @@ async def list_devices(
 @router.get("/overview", response_model=list[SwitchOverview])
 async def devices_overview(
     session: ActiveSession = Depends(get_active_session),
+    refresh: bool = Query(
+        default=False,
+        description="Bypass TTL cache and re-query switches live (manual Refresh).",
+    ),
 ) -> list[SwitchOverview]:
     write_audit(
         session.user.username,
         "collect_overview",
-        "Triggered fleet overview collection using session credentials",
+        "Triggered fleet overview collection using session credentials"
+        + (" (force refresh)" if refresh else " (cache allowed)"),
     )
-    return cisco_collector.collect_all_overviews(session.device_credentials)
+    return cisco_collector.collect_all_overviews(
+        session.device_credentials,
+        force_refresh=refresh,
+    )
 
 
 @router.get("/{hostname}", response_model=SwitchDetail)
 async def device_detail(
     hostname: str,
     session: ActiveSession = Depends(get_active_session),
+    refresh: bool = Query(
+        default=False,
+        description="Bypass TTL cache and re-query this switch live.",
+    ),
 ) -> SwitchDetail:
     write_audit(
         session.user.username,
         "collect_detail",
-        f"Collected detail for {hostname} using session credentials",
+        f"Collected detail for {hostname} using session credentials"
+        + (" (force refresh)" if refresh else " (cache allowed)"),
         hostname=hostname,
     )
     try:
-        return cisco_collector.collect_switch_detail(hostname, session.device_credentials)
+        return cisco_collector.collect_switch_detail(
+            hostname,
+            session.device_credentials,
+            force_refresh=refresh,
+        )
     except cisco_collector.CollectorError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
@@ -81,13 +98,14 @@ async def device_connectivity_probe(
     """
     Live SSH probe for one switch using the caller's login-session credentials.
 
-    Used by the UI / operators to validate handshake, auth, model, firmware,
-    and interface parsing without any ``SSH_TEST_*`` environment variables.
+    Always bypasses the collector TTL cache (Test SSH). Used by the UI /
+    operators to validate handshake, auth, model, firmware, and interface
+    parsing without any ``SSH_TEST_*`` environment variables.
     """
     write_audit(
         session.user.username,
         "connectivity_probe",
-        f"Probed {hostname} with session credentials (source=session)",
+        f"Probed {hostname} with session credentials (source=session, live)",
         hostname=hostname,
     )
     try:

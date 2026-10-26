@@ -102,13 +102,19 @@ export const api = {
   listDevices() {
     return request<DeviceSummary[]>("/api/devices");
   },
-  overview() {
-    return request<SwitchOverview[]>("/api/devices/overview");
+  /** Fleet overview. Pass refresh=true for manual Refresh / auto-refresh (bypass TTL cache). */
+  overview(refresh = false) {
+    const qs = refresh ? "?refresh=true" : "";
+    return request<SwitchOverview[]>(`/api/devices/overview${qs}`);
   },
-  deviceDetail(hostname: string) {
-    return request<SwitchDetail>(`/api/devices/${encodeURIComponent(hostname)}`);
+  /** Switch detail. Cached by default; refresh=true forces a live SSH collect. */
+  deviceDetail(hostname: string, refresh = false) {
+    const qs = refresh ? "?refresh=true" : "";
+    return request<SwitchDetail>(
+      `/api/devices/${encodeURIComponent(hostname)}${qs}`,
+    );
   },
-  /** Uses Bearer session credentials from login — never env-var SSH secrets. */
+  /** Live Test SSH — always bypasses cache. Uses Bearer session credentials. */
   probeDevice(hostname: string) {
     return request<ConnectivityProbeResult>(
       `/api/devices/${encodeURIComponent(hostname)}/probe`,
