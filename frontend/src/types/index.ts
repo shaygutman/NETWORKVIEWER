@@ -1,5 +1,6 @@
 export type PlatformType = "cisco_ios" | "cisco_nxos" | "cisco_xe";
-export type PortStatus = "up" | "down" | "admin-down" | "unknown";
+export type PortStatus = "up" | "down" | "admin-down" | "err-disabled" | "unknown";
+export type NeighborDeviceType = "switch" | "phone" | "ap" | "server" | "host" | "unknown";
 
 export interface UserInfo {
   username: string;
@@ -29,12 +30,38 @@ export interface DeviceSummary {
 export interface PortDetail {
   port: string;
   status: PortStatus;
+  /** Access VLAN ID, "trunk", "trunk (native N)", or "routed". */
   vlan?: string | null;
   duplex?: string | null;
   speed?: string | null;
   type?: string | null;
   description?: string | null;
   trust_level?: string | null;
+  neighbor_hostname?: string | null;
+  neighbor_ip?: string | null;
+  neighbor_platform?: string | null;
+  neighbor_port?: string | null;
+  neighbor_protocol?: "cdp" | "lldp" | null;
+  neighbor_device_type?: NeighborDeviceType | null;
+  connected_device?: string | null;
+  poe_status?: string | null;
+  poe_watts?: number | null;
+  poe_class?: string | null;
+  poe_max_watts?: number | null;
+  poe_high_draw?: boolean;
+  err_disabled?: boolean;
+  err_disabled_reason?: string | null;
+  input_errors?: number | null;
+  output_errors?: number | null;
+  crc_errors?: number | null;
+  frame_errors?: number | null;
+  collisions?: number | null;
+  duplex_mismatch?: boolean;
+  high_errors?: boolean;
+  down_since?: string | null;
+  stale_days?: number | null;
+  is_stale?: boolean;
+  health_flags?: string[];
   packets_in?: number | null;
   packets_out?: number | null;
   bytes_in?: number | null;
@@ -60,12 +87,19 @@ export interface SwitchOverview {
   interface_count: number;
   interfaces_up: number;
   interfaces_down: number;
+  poe_supported?: boolean | null;
+  poe_used_watts?: number | null;
+  poe_available_watts?: number | null;
+  err_disabled_count?: number;
+  stale_port_count?: number;
+  health_warning_count?: number;
   error?: string | null;
 }
 
 export interface SwitchDetail extends SwitchOverview {
   interfaces: PortDetail[];
   recommended_commands: string[];
+  stale_port_days_threshold?: number;
 }
 
 /** Live SSH probe — always uses the logged-in UI session credentials. */
@@ -105,6 +139,29 @@ export interface MacLookupResponse {
   errors: string[];
 }
 
+export interface TrackerHit {
+  query_type: "ip" | "mac" | "hostname" | "neighbor" | "unknown";
+  hostname: string;
+  switch_ip: string;
+  port?: string | null;
+  vlan?: string | null;
+  mac?: string | null;
+  ip?: string | null;
+  neighbor_hostname?: string | null;
+  source: "mac" | "arp" | "neighbor" | "cache";
+  detail?: string | null;
+}
+
+export interface TrackerSearchResponse {
+  query: string;
+  query_type: "ip" | "mac" | "hostname" | "neighbor" | "unknown";
+  hits: TrackerHit[];
+  devices_queried: number;
+  devices_failed: number;
+  errors: string[];
+  searched_at: string;
+}
+
 export interface BaselineDiffLine {
   tag: "equal" | "insert" | "delete" | "replace";
   baseline_line?: string | null;
@@ -121,6 +178,16 @@ export interface BaselineDiffResponse {
   diff_lines: BaselineDiffLine[];
   collected_at: string;
   error?: string | null;
+}
+
+/** Result of a read-only show-command execution on a switch. */
+export interface ExecCommandResponse {
+  hostname: string;
+  command: string;
+  output: string;
+  success: boolean;
+  error?: string | null;
+  executed_at: string;
 }
 
 export type DashboardTab = "switches" | "mac" | "baseline";

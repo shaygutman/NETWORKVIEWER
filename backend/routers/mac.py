@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends
 
 from backend.auth.dependencies import ActiveSession, get_active_session
@@ -17,10 +19,11 @@ async def mac_lookup(
     payload: MacLookupRequest,
     session: ActiveSession = Depends(get_active_session),
 ) -> MacLookupResponse:
-    hits, queried, failed, errors = lookup_mac_across_inventory(
+    hits, queried, failed, errors = await asyncio.to_thread(
+        lookup_mac_across_inventory,
         payload.mac,
         session.device_credentials,
-        hostname=payload.hostname,
+        payload.hostname,
     )
     write_audit(
         session.user.username,

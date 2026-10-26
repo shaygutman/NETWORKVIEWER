@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -16,6 +18,9 @@ from backend.auth.session_store import bare_sam_account, credential_store
 from backend.config import get_settings
 from backend.models.schemas import AuthToken, LoginRequest, UserInfo
 from backend.services.audit import write_audit
+from backend.services.background_poller import run_fleet_poll_cycle
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 optional_bearer = HTTPBearer(auto_error=False)
@@ -69,6 +74,19 @@ async def login(payload: LoginRequest) -> AuthToken:
         "Successful login (credentials held in memory only)",
         success=True,
     )
+
+    # Warm sticky cache in the background only when empty (login stays instant).
+    if settings.collector_poll_enabled:
+        async def _warm_cache_after_login() -> None:
+            try:
+                await asyncio.to_thread(
+                    lambda: run_fleet_poll_cycle(settings, only_if_cache_empty=True)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Post-login cache warm failed: %s", exc)
+
+        asyncio.create_task(_warm_cache_after_login(), name="nms-post-login-poll")
+
     return AuthToken(
         access_token=token,
         token_type="bearer",

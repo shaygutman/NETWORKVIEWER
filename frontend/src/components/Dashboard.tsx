@@ -5,9 +5,10 @@ import type {
   ConnectivityProbeResult,
   DashboardTab,
   DeviceSummary,
-  MacLookupResponse,
   SwitchDetail,
   SwitchOverview,
+  TrackerHit,
+  TrackerSearchResponse,
   UserInfo,
 } from "../types";
 import { CliCommandsModal } from "./CliCommandsModal";
@@ -32,9 +33,15 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [lastSync, setLastSync] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [headerMac, setHeaderMac] = useState("");
-  const [macQuickResult, setMacQuickResult] = useState<MacLookupResponse | null>(null);
-  const [commandsModal, setCommandsModal] = useState<{ title: string; commands: string[] } | null>(null);
+  const [globalQuery, setGlobalQuery] = useState("");
+  const [trackerResult, setTrackerResult] = useState<TrackerSearchResponse | null>(null);
+  const [trackerLoading, setTrackerLoading] = useState(false);
+  const [highlightPort, setHighlightPort] = useState<string | null>(null);
+  const [commandsModal, setCommandsModal] = useState<{
+    title: string;
+    hostname: string;
+    commands: string[];
+  } | null>(null);
   const [probeResult, setProbeResult] = useState<ConnectivityProbeResult | null>(null);
   const [probing, setProbing] = useState(false);
 
@@ -43,7 +50,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     [overviews],
   );
 
-  /** force=true bypasses backend TTL cache (manual Refresh / auto-refresh). */
+  /** force=true = on-demand live SSH collect. Default = cache-only (instant). */
   const refreshFleet = useCallback(async (force = false) => {
     setLoadingFleet(true);
     setError(null);
@@ -74,7 +81,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     }
   }, [selectedHost]);
 
-  /** Cached by default; pass force=true only when explicitly re-collecting. */
+  /** Cache-only by default; pass force=true only for on-demand live collect. */
   const loadDetail = useCallback(async (hostname: string, force = false) => {
     setLoadingDetail(true);
     setProbeResult(null);
@@ -83,7 +90,13 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       setDetail(data);
     } catch (err) {
       setDetail(null);
-      setError(err instanceof Error ? err.message : "Failed to load switch detail");
+      const message = err instanceof Error ? err.message : "Failed to load switch detail";
+      // Cache miss is expected before the first poll — not a hard failure.
+      if (!force && /no cached data/i.test(message)) {
+        setError(null);
+      } else {
+        setError(message);
+      }
     } finally {
       setLoadingDetail(false);
     }
@@ -124,7 +137,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   }, [loadDetail]);
 
   useEffect(() => {
-    // First paint: prefer cache; live SSH only on cold miss.
+    // First paint: cache-only — background poller keeps data fresh.
     void refreshFleet(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only initial load
   }, []);
@@ -137,21 +150,35 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
 
   useEffect(() => {
     if (!autoRefresh) return;
+    // Auto-refresh re-reads local cache only — never triggers fleet SSH.
     const timer = window.setInterval(() => {
-      void refreshFleet(true);
+      void refreshFleet(false);
     }, 60000);
     return () => window.clearInterval(timer);
   }, [autoRefresh, refreshFleet]);
 
-  async function handleHeaderMac(event: FormEvent) {
+  async function handleGlobalSearch(event: FormEvent) {
     event.preventDefault();
-    setTab("mac");
+    const q = globalQuery.trim();
+    if (q.length < 2) return;
+    setTrackerLoading(true);
+    setError(null);
     try {
-      const result = await api.macLookup(headerMac.trim());
-      setMacQuickResult(result);
+      const result = await api.trackerSearch(q);
+      setTrackerResult(result);
+      setTab("switches");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "MAC lookup failed");
+      setTrackerResult(null);
+      setError(err instanceof Error ? err.message : "Global search failed");
+    } finally {
+      setTrackerLoading(false);
     }
+  }
+
+  function jumpToTrackerHit(hit: TrackerHit) {
+    setTab("switches");
+    setSelectedHost(hit.hostname);
+    setHighlightPort(hit.port || null);
   }
 
   async function openCommands(port?: string) {
@@ -160,6 +187,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       const commands = await api.recommendedCommands(selectedHost, port);
       setCommandsModal({
         title: port ? `${selectedHost} · ${port}` : selectedHost,
+        hostname: selectedHost,
         commands,
       });
     } catch (err) {
@@ -191,15 +219,16 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
             </p>
           </div>
 
-          <form onSubmit={handleHeaderMac} className="flex w-full max-w-md gap-2">
+          <form onSubmit={handleGlobalSearch} className="flex w-full max-w-lg gap-2">
             <input
               className="noc-input font-mono"
-              placeholder="MAC lookup…"
-              value={headerMac}
-              onChange={(e) => setHeaderMac(e.target.value)}
+              placeholder="Global search: IP, MAC, or hostname…"
+              value={globalQuery}
+              onChange={(e) => setGlobalQuery(e.target.value)}
+              title="Searches ARP, MAC tables, and CDP/LLDP neighbors (read-only)"
             />
-            <button type="submit" className="noc-btn-ghost shrink-0">
-              Find
+            <button type="submit" className="noc-btn-ghost shrink-0" disabled={trackerLoading}>
+              {trackerLoading ? "Searching…" : "Search"}
             </button>
           </form>
 
@@ -215,11 +244,19 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
             </label>
             <button
               className="noc-btn-ghost"
-              onClick={() => void refreshFleet(true)}
+              onClick={() => void refreshFleet(false)}
               disabled={loadingFleet}
-              title="Force live SSH collection (bypasses cache)"
+              title="Reload from local cache (instant — no SSH)"
             >
               {loadingFleet ? "Refreshing…" : "Refresh"}
+            </button>
+            <button
+              className="noc-btn-ghost"
+              onClick={() => void refreshFleet(true)}
+              disabled={loadingFleet}
+              title="Live SSH collect for all switches (slow — updates cache in background)"
+            >
+              Live collect
             </button>
             <span className="rounded-lg border border-noc-border px-3 py-2 text-xs text-slate-300">
               {user.display_name || user.username}
@@ -257,6 +294,60 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         {error && (
           <div className="mb-4 rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
             {error}
+          </div>
+        )}
+
+        {trackerResult && (
+          <div className="mb-4 noc-panel p-4">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm text-slate-200">
+                Global search <span className="font-mono text-cyan-300">{trackerResult.query}</span>
+                {" · "}
+                type={trackerResult.query_type}
+                {" · "}
+                {trackerResult.hits.length} hit(s)
+              </p>
+              <button type="button" className="noc-btn-ghost text-xs" onClick={() => setTrackerResult(null)}>
+                Dismiss
+              </button>
+            </div>
+            {trackerResult.hits.length === 0 ? (
+              <p className="text-sm text-noc-muted">No bindings found across the fleet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="text-xs uppercase text-slate-400">
+                    <tr>
+                      <th className="px-2 py-1">Switch</th>
+                      <th className="px-2 py-1">Port</th>
+                      <th className="px-2 py-1">VLAN</th>
+                      <th className="px-2 py-1">MAC</th>
+                      <th className="px-2 py-1">IP</th>
+                      <th className="px-2 py-1">Neighbor</th>
+                      <th className="px-2 py-1">Source</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {trackerResult.hits.map((hit, idx) => (
+                      <tr
+                        key={`${hit.hostname}-${hit.port}-${hit.mac}-${hit.ip}-${idx}`}
+                        className="cursor-pointer border-t border-noc-border/60 hover:bg-cyan-500/5"
+                        onClick={() => jumpToTrackerHit(hit)}
+                        title="Open switch and highlight port"
+                      >
+                        <td className="px-2 py-1.5 font-mono text-cyan-200">{hit.hostname}</td>
+                        <td className="px-2 py-1.5 font-mono">{hit.port || "—"}</td>
+                        <td className="px-2 py-1.5 font-mono">{hit.vlan || "—"}</td>
+                        <td className="px-2 py-1.5 font-mono">{hit.mac || "—"}</td>
+                        <td className="px-2 py-1.5 font-mono">{hit.ip || "—"}</td>
+                        <td className="px-2 py-1.5">{hit.neighbor_hostname || "—"}</td>
+                        <td className="px-2 py-1.5 text-xs uppercase text-noc-muted">{hit.source}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
 
@@ -328,8 +419,51 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                       {probeResult.error ? ` · error: ${probeResult.error}` : ""}
                     </div>
                   )}
+                  {(detail.poe_used_watts != null || detail.poe_available_watts != null) && (
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-xs text-noc-muted">
+                        <span>PoE budget</span>
+                        <span className="font-mono text-slate-200">
+                          {detail.poe_used_watts ?? "—"}W / {detail.poe_available_watts ?? "—"}W used
+                        </span>
+                      </div>
+                      <div className="h-2 overflow-hidden rounded bg-slate-800">
+                        <div
+                          className="h-full rounded bg-cyan-500/70"
+                          style={{
+                            width: `${Math.min(
+                              100,
+                              detail.poe_available_watts && detail.poe_available_watts > 0
+                                ? ((detail.poe_used_watts || 0) / detail.poe_available_watts) * 100
+                                : 0,
+                            )}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-3 text-xs text-noc-muted">
+                    <span>
+                      Err-disabled:{" "}
+                      <span className={detail.err_disabled_count ? "text-rose-300" : "text-slate-300"}>
+                        {detail.err_disabled_count ?? 0}
+                      </span>
+                    </span>
+                    <span>
+                      Health warnings:{" "}
+                      <span className={detail.health_warning_count ? "text-amber-300" : "text-slate-300"}>
+                        {detail.health_warning_count ?? 0}
+                      </span>
+                    </span>
+                    <span>
+                      Unused (≥{detail.stale_port_days_threshold ?? 30}d):{" "}
+                      <span className="text-slate-300">{detail.stale_port_count ?? 0}</span>
+                    </span>
+                  </div>
                   <PortTable
                     interfaces={detail.interfaces}
+                    highlightPort={highlightPort}
+                    staleDaysThreshold={detail.stale_port_days_threshold ?? 30}
                     onPortSelect={(port) => void openCommands(port)}
                   />
                 </div>
@@ -359,12 +493,6 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         {tab === "mac" && (
           <div className="space-y-4">
             <MacLookup />
-            {macQuickResult && (
-              <div className="noc-panel p-4 text-sm text-noc-muted">
-                Header search returned {macQuickResult.hits.length} hit(s) for{" "}
-                <span className="font-mono text-cyan-300">{macQuickResult.normalized_mac}</span>.
-              </div>
-            )}
           </div>
         )}
 
@@ -376,6 +504,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       {commandsModal && (
         <CliCommandsModal
           title={commandsModal.title}
+          hostname={commandsModal.hostname}
           commands={commandsModal.commands}
           onClose={() => setCommandsModal(null)}
         />

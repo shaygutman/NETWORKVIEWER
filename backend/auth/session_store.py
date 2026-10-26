@@ -90,6 +90,24 @@ class CredentialSessionStore:
                 return None
             return DeviceCredentials(username=record.ssh_username, password=plaintext)
 
+    def get_any_active_credentials(self) -> DeviceCredentials | None:
+        """Return credentials from any non-expired UI session (background poller)."""
+        self.purge_expired()
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            for session_id, record in list(self._sessions.items()):
+                if record.expires_at <= now:
+                    self._destroy_locked(session_id)
+                    continue
+                try:
+                    plaintext = _fernet().decrypt(record.password_token).decode("utf-8")
+                except InvalidToken:
+                    logger.warning("Session credential token invalid; wiping session")
+                    self._destroy_locked(session_id)
+                    continue
+                return DeviceCredentials(username=record.ssh_username, password=plaintext)
+        return None
+
     def destroy(self, session_id: str) -> bool:
         with self._lock:
             return self._destroy_locked(session_id)

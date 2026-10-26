@@ -63,8 +63,23 @@ class Settings(BaseSettings):
     ssh_timeout: int = 5
     ssh_conn_timeout: int = 3
     collector_max_workers: int = 8
-    # In-memory TTL for overview / detail / interface snapshots (seconds).
-    collector_cache_ttl_seconds: int = 300
+    # Soft freshness window for snapshots (seconds). GUI reads are sticky and
+    # do not SSH; background polling refreshes entries within this window.
+    collector_cache_ttl_seconds: int = 1800
+    # Background poll interval (seconds). Default 10 minutes (range 5–15 min).
+    collector_poll_interval_seconds: int = 600
+    collector_poll_enabled: bool = True
+    # Optional dedicated read-only poller service account (unattended cycles).
+    # When empty, the poller reuses credentials from any active UI login session.
+    poller_ssh_username: str = Field(default="")
+    poller_ssh_password: str = Field(default="")
+    # Durable SQLite cache (snapshots + unused-port / link-state history).
+    cache_db_path: Path = Field(default=ROOT_DIR / "backend" / "data" / "nms_cache.db")
+    # Ports continuously down this many days are flagged unused (capacity planning).
+    # Aging uses SQLite history — independent of switch reboot uptime.
+    stale_port_days: int = 30
+    # PoE draw above this fraction of the port Max (Watts) is flagged high-draw.
+    poe_high_draw_ratio: float = 0.8
 
     # CORS
     cors_origins: str = Field(
@@ -86,3 +101,4 @@ def ensure_runtime_dirs(settings: Settings | None = None) -> None:
     cfg = settings or get_settings()
     cfg.baselines_dir.mkdir(parents=True, exist_ok=True)
     cfg.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.cache_db_path.parent.mkdir(parents=True, exist_ok=True)

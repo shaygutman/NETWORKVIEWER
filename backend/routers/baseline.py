@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends
 
 from backend.auth.dependencies import ActiveSession, get_active_session, get_current_user
@@ -25,7 +27,11 @@ async def baseline_diff(
     hostname: str,
     session: ActiveSession = Depends(get_active_session),
 ) -> BaselineDiffResponse:
-    result = compare_baseline(hostname, session.device_credentials)
+    result = await asyncio.to_thread(
+        compare_baseline,
+        hostname,
+        session.device_credentials,
+    )
     write_audit(
         session.user.username,
         "baseline_diff",

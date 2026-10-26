@@ -3,9 +3,11 @@ import type {
   BaselineDiffResponse,
   ConnectivityProbeResult,
   DeviceSummary,
+  ExecCommandResponse,
   MacLookupResponse,
   SwitchDetail,
   SwitchOverview,
+  TrackerSearchResponse,
   UserInfo,
 } from "../types";
 
@@ -102,19 +104,19 @@ export const api = {
   listDevices() {
     return request<DeviceSummary[]>("/api/devices");
   },
-  /** Fleet overview. Pass refresh=true for manual Refresh / auto-refresh (bypass TTL cache). */
+  /** Fleet overview. Default = local cache only (no SSH). refresh=true = on-demand live collect. */
   overview(refresh = false) {
     const qs = refresh ? "?refresh=true" : "";
     return request<SwitchOverview[]>(`/api/devices/overview${qs}`);
   },
-  /** Switch detail. Cached by default; refresh=true forces a live SSH collect. */
+  /** Switch detail. Default = local cache only (no SSH). refresh=true = on-demand live collect. */
   deviceDetail(hostname: string, refresh = false) {
     const qs = refresh ? "?refresh=true" : "";
     return request<SwitchDetail>(
       `/api/devices/${encodeURIComponent(hostname)}${qs}`,
     );
   },
-  /** Live Test SSH — always bypasses cache. Uses Bearer session credentials. */
+  /** Live Test SSH — always live collect + cache update. Uses Bearer session credentials. */
   probeDevice(hostname: string) {
     return request<ConnectivityProbeResult>(
       `/api/devices/${encodeURIComponent(hostname)}/probe`,
@@ -124,10 +126,27 @@ export const api = {
     const qs = port ? `?port=${encodeURIComponent(port)}` : "";
     return request<string[]>(`/api/devices/${encodeURIComponent(hostname)}/commands${qs}`);
   },
+  /** Run one read-only show command on a switch (backend enforces show-only safety gate). */
+  execCommand(hostname: string, command: string) {
+    return request<ExecCommandResponse>(
+      `/api/devices/${encodeURIComponent(hostname)}/exec-command`,
+      {
+        method: "POST",
+        body: JSON.stringify({ command }),
+      },
+    );
+  },
   macLookup(mac: string, hostname?: string) {
     return request<MacLookupResponse>("/api/mac/lookup", {
       method: "POST",
       body: JSON.stringify({ mac, hostname: hostname || null }),
+    });
+  },
+  /** Global IP / MAC / hostname tracker (read-only fleet search). */
+  trackerSearch(query: string, hostname?: string) {
+    return request<TrackerSearchResponse>("/api/tracker/search", {
+      method: "POST",
+      body: JSON.stringify({ query, hostname: hostname || null }),
     });
   },
   baselineDiff(hostname: string) {

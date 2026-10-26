@@ -10,7 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import ensure_runtime_dirs, get_settings
 from backend.models.schemas import HealthResponse
-from backend.routers import audit, auth, baseline, devices, mac
+from backend.routers import audit, auth, baseline, devices, mac, tracker
+from backend.services.background_poller import (
+    poller_status,
+    start_background_poller,
+    stop_background_poller,
+)
+from backend.services.collector_cache import collector_cache
 from backend.services.inventory import InventoryError, load_inventory
 
 logging.basicConfig(
@@ -29,7 +35,18 @@ async def lifespan(_app: FastAPI):
         logger.info("Loaded %s device(s) from inventory", len(devices))
     except InventoryError as exc:
         logger.warning("Inventory not ready at startup: %s", exc)
-    yield
+
+    # Hydrate sticky in-memory cache + unused-port history from SQLite (no SSH).
+    try:
+        collector_cache.hydrate_from_disk(settings.collector_cache_ttl_seconds)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Cache hydration failed: %s", exc)
+
+    start_background_poller(settings)
+    try:
+        yield
+    finally:
+        await stop_background_poller()
 
 
 def create_app() -> FastAPI:
@@ -51,6 +68,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router, prefix="/api")
     app.include_router(devices.router, prefix="/api")
     app.include_router(mac.router, prefix="/api")
+    app.include_router(tracker.router, prefix="/api")
     app.include_router(baseline.router, prefix="/api")
     app.include_router(audit.router, prefix="/api")
 
@@ -68,6 +86,11 @@ def create_app() -> FastAPI:
             auth_mode=cfg.auth_mode,
             device_count=count,
         )
+
+    @app.get("/api/health/poller", tags=["health"])
+    async def poller_health() -> dict:
+        """Background poller status — no SSH; safe for ops dashboards."""
+        return poller_status.as_dict()
 
     return app
 
