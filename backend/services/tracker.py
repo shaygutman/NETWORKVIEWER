@@ -1,7 +1,8 @@
 """Global IP / MAC / hostname tracker — read-only correlation across the fleet.
 
 Uses cached ARP/neighbor bindings when warm, then live ``show mac address-table``
-and ``show ip arp`` (never configuration commands).
+and ``show ip arp`` (never configuration commands). Unreachable switches fall
+back to the latest sticky local MAC/ARP cache instead of empty results.
 """
 
 from __future__ import annotations
@@ -17,8 +18,10 @@ from backend.config import Settings, get_settings
 from backend.models.schemas import DeviceInventoryItem, TrackerHit, TrackerSearchResponse
 from backend.services.collector_cache import collector_cache
 from backend.services.cisco_collector import (
+    _bulk_search_settings,
     _friendly_error,
     _run_commands,
+    _split_live_vs_unreachable,
     _to_cisco_mac,
     parse_mac_table,
 )
@@ -50,6 +53,7 @@ def global_tracker_search(
 ) -> TrackerSearchResponse:
     """Search MAC / ARP / neighbor bindings across inventory (read-only)."""
     cfg = settings or get_settings()
+    bulk_cfg = _bulk_search_settings(cfg)
     q = query.strip()
     qtype = detect_query_type(q)
     devices = load_inventory()
@@ -59,13 +63,44 @@ def global_tracker_search(
     hits: list[TrackerHit] = []
     errors: list[str] = []
     failed = 0
+    from_cache_hosts: set[str] = set()
+    unreachable: list[str] = []
 
-    # 1) Fast path: in-memory cache (neighbors + ARP from recent collects).
-    hits.extend(_search_cache(q, qtype, hostname))
+    # 1) Fast path: sticky in-memory / SQLite cache (neighbors + ARP + MAC).
+    cache_hits = _search_cache(q, qtype, hostname)
+    hits.extend(cache_hits)
+    for hit in cache_hits:
+        from_cache_hosts.add(hit.hostname.lower())
 
-    # 2) Live path: parallel MAC + ARP show commands on each device.
-    if devices:
-        workers = max(1, min(cfg.collector_max_workers, len(devices)))
+    # 2) Live SSH only on switches not already known unreachable.
+    live_targets, known_down = _split_live_vs_unreachable(devices)
+    for device in known_down:
+        failed += 1
+        unreachable.append(device.hostname)
+        cached_for_host = [
+            h for h in cache_hits if h.hostname.lower() == device.hostname.lower()
+        ]
+        if not cached_for_host:
+            extra = _search_cache(q, qtype, device.hostname)
+            if extra:
+                from_cache_hosts.add(device.hostname.lower())
+                hits.extend(extra)
+                errors.append(
+                    f"{device.hostname}: skipped live SSH (previously unreachable) — used cache"
+                )
+            else:
+                errors.append(
+                    f"{device.hostname}: skipped live SSH (previously unreachable) — no cache"
+                )
+        else:
+            from_cache_hosts.add(device.hostname.lower())
+            errors.append(
+                f"{device.hostname}: skipped live SSH (previously unreachable) — used cache"
+            )
+
+    live_hosts_ok: set[str] = set()
+    if live_targets:
+        workers = max(1, min(cfg.collector_max_workers, len(live_targets)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(
@@ -74,22 +109,79 @@ def global_tracker_search(
                     q,
                     qtype,
                     device_credentials,
-                    cfg,
+                    bulk_cfg,
                 ): device
-                for device in devices
+                for device in live_targets
             }
             for future in as_completed(futures):
                 device = futures[future]
                 try:
-                    hits.extend(future.result())
+                    live_hits = future.result()
+                    hits.extend(live_hits)
+                    live_hosts_ok.add(device.hostname.lower())
                 except Exception as exc:  # noqa: BLE001
                     failed += 1
-                    errors.append(f"{device.hostname}: {_friendly_error(exc)}")
-                    logger.warning("Tracker search failed on %s: %s", device.hostname, exc)
+                    friendly = _friendly_error(exc)
+                    errors.append(f"{device.hostname}: {friendly}")
+                    unreachable.append(device.hostname)
+                    cached_for_host = [
+                        h
+                        for h in cache_hits
+                        if h.hostname.lower() == device.hostname.lower()
+                    ]
+                    if cached_for_host:
+                        from_cache_hosts.add(device.hostname.lower())
+                        logger.info(
+                            "Tracker search SSH failed on %s (%s) — using %s cached hit(s)",
+                            device.hostname,
+                            friendly,
+                            len(cached_for_host),
+                        )
+                    else:
+                        # Attempt a direct sticky cache probe for this host only.
+                        extra = _search_cache(q, qtype, device.hostname)
+                        if extra:
+                            from_cache_hosts.add(device.hostname.lower())
+                            hits.extend(extra)
+                            logger.info(
+                                "Tracker search SSH failed on %s (%s) — recovered %s cached hit(s)",
+                                device.hostname,
+                                friendly,
+                                len(extra),
+                            )
+                        else:
+                            logger.warning(
+                                "Tracker search failed on %s: %s",
+                                device.hostname,
+                                friendly,
+                            )
+
+    # Mark cache-only hits that never got a live refresh on that host.
+    for hit in hits:
+        if hit.hostname.lower() not in live_hosts_ok and (
+            hit.source == "cache" or hit.from_cache or hit.hostname.lower() in from_cache_hosts
+        ):
+            hit.from_cache = True
+            if hit.detail is None:
+                hit.detail = "Cached binding (switch unreachable)"
 
     resolved_type: QueryType = qtype
     if resolved_type == "unknown" and re.search(r"[A-Za-z]", q):
         resolved_type = "hostname"
+
+    devices_from_cache = len(from_cache_hosts)
+    warning: str | None = None
+    if failed > 0:
+        if devices_from_cache > 0:
+            warning = (
+                f"{failed} switch(es) unreachable — showing results from cache "
+                f"for {devices_from_cache} of them"
+            )
+        else:
+            warning = (
+                f"{failed} switch(es) unreachable — no cached MAC/ARP available "
+                "for those hosts"
+            )
 
     return TrackerSearchResponse(
         query=q,
@@ -97,6 +189,10 @@ def global_tracker_search(
         hits=_dedupe_hits(hits),
         devices_queried=len(devices),
         devices_failed=failed,
+        devices_from_cache=devices_from_cache,
+        cache_fallback_used=devices_from_cache > 0,
+        unreachable_hosts=unreachable,
+        warning=warning,
         errors=errors,
         searched_at=datetime.now(timezone.utc),
     )
@@ -107,7 +203,7 @@ def _search_cache(query: str, qtype: QueryType, hostname: str | None) -> list[Tr
     needle = query.strip().lower()
     mac_needle = re.sub(r"[.\-:\s]", "", needle)
 
-    for row in collector_cache.get_tracker_index():
+    for row in collector_cache.get_tracker_index(sticky=True):
         if hostname and row.hostname.lower() != hostname.lower():
             continue
         matched = False
@@ -141,6 +237,7 @@ def _search_cache(query: str, qtype: QueryType, hostname: str | None) -> list[Tr
                 neighbor_hostname=row.neighbor_hostname,
                 source=source,
                 detail="Cached binding",
+                from_cache=True,
             )
         )
 
@@ -168,6 +265,7 @@ def _search_cache(query: str, qtype: QueryType, hostname: str | None) -> list[Tr
                     neighbor_hostname=iface.neighbor_hostname,
                     source="neighbor",
                     detail=iface.connected_device,
+                    from_cache=True,
                 )
             )
     return hits
@@ -190,7 +288,6 @@ def _live_search_device(
         commands.extend(
             [
                 f"show mac address-table | include {cisco_mac}",
-                "show mac address-table",
                 "show ip arp",
             ]
         )
@@ -198,7 +295,6 @@ def _live_search_device(
         commands.extend(
             [
                 f"show ip arp | include {query}",
-                "show ip arp",
                 "show mac address-table",
             ]
         )
@@ -228,6 +324,7 @@ def _live_search_device(
                     mac=hit.mac,
                     ip=None,
                     source="mac",
+                    from_cache=False,
                 )
             )
 
@@ -268,6 +365,7 @@ def _live_search_device(
                 mac=mac,
                 ip=row.get("ip"),
                 source="arp",
+                from_cache=False,
             )
         )
     return hits
@@ -276,7 +374,9 @@ def _live_search_device(
 def _dedupe_hits(hits: list[TrackerHit]) -> list[TrackerHit]:
     seen: set[tuple[str, str, str, str, str]] = set()
     out: list[TrackerHit] = []
-    for hit in hits:
+    # Prefer live rows over cache duplicates for the same binding.
+    ordered = sorted(hits, key=lambda h: (1 if h.from_cache else 0))
+    for hit in ordered:
         key = (
             hit.hostname.lower(),
             (hit.port or "").lower(),

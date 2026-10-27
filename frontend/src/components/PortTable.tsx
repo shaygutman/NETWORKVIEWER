@@ -143,6 +143,19 @@ function poeLabel(iface: PortDetail): string {
   return [watts, cls, st].filter(Boolean).join(" · ");
 }
 
+function macLabel(iface: PortDetail): { text: string; title: string } {
+  const macs = iface.mac_addresses ?? [];
+  if (macs.length === 0) return { text: "—", title: "" };
+  if (macs.length <= 2) {
+    const text = macs.join(", ");
+    return { text, title: text };
+  }
+  return {
+    text: `${macs.slice(0, 2).join(", ")} +${macs.length - 2}`,
+    title: macs.join("\n"),
+  };
+}
+
 export function PortTable({
   interfaces,
   onPortSelect,
@@ -262,8 +275,9 @@ export function PortTable({
               <tr>
                 <th className="px-3 py-2">Port</th>
                 <th className="px-3 py-2">Status</th>
-                <th className="px-3 py-2">Health</th>
                 <th className="px-3 py-2">VLAN</th>
+                <th className="px-3 py-2">MAC Address</th>
+                <th className="px-3 py-2">Health</th>
                 <th className="px-3 py-2">Connected Device / Neighbor</th>
                 <th className="px-3 py-2">PoE</th>
                 <th className="px-3 py-2">Speed</th>
@@ -276,6 +290,7 @@ export function PortTable({
                 const highlighted =
                   highlightPort &&
                   iface.port.toLowerCase() === highlightPort.toLowerCase();
+                const macs = macLabel(iface);
                 return (
                   <tr
                     key={iface.port}
@@ -289,10 +304,16 @@ export function PortTable({
                     <td className="px-3 py-2">
                       <StatusBadge status={iface.status} reason={iface.err_disabled_reason} />
                     </td>
+                    <td className="px-3 py-2 font-mono">{iface.vlan || "—"}</td>
+                    <td
+                      className="max-w-[12rem] px-3 py-2 font-mono text-xs text-slate-200"
+                      title={macs.title || undefined}
+                    >
+                      <span className="line-clamp-2">{macs.text}</span>
+                    </td>
                     <td className="px-3 py-2">
                       <HealthBadges iface={iface} />
                     </td>
-                    <td className="px-3 py-2 font-mono">{iface.vlan || "—"}</td>
                     <td className="max-w-xs px-3 py-2 text-slate-300" title={neighborLabel(iface)}>
                       <span className="inline-flex items-start">
                         <DeviceIcon type={iface.neighbor_device_type} />

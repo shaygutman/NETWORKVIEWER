@@ -191,6 +191,8 @@ READ_ONLY_COMMANDS: dict[str, list[str]] = {
     ],
 }
 
+# Curated read-only show lists — syntax verified for Catalyst IOS/XE and NX-OS.
+# No configure / write / reload / clear / debug. Platform-specific keys below.
 RECOMMENDED_COMMANDS: dict[str, list[str]] = {
     "switch": [
         "show version",
@@ -201,13 +203,12 @@ RECOMMENDED_COMMANDS: dict[str, list[str]] = {
         "show processes cpu sorted",
         "show processes memory sorted",
         "show logging | include LINK-3-UPDOWN",
-        "show logging | include %LINEPROTO",
+        "show logging | include LINEPROTO",
         "show spanning-tree summary",
         "show spanning-tree root",
         "show vlan brief",
         "show etherchannel summary",
         "show ip interface brief",
-        "show ip route summary",
         "show ip arp",
         "show mac address-table count",
         "show cdp neighbors detail",
@@ -215,27 +216,48 @@ RECOMMENDED_COMMANDS: dict[str, list[str]] = {
         "show power inline",
         "show environment all",
         "show env temperature status",
-        "show module",
-        "show boot",
-        "show reload",
         "show clock",
         "show users",
-        "show snmp community",
         "show ip dhcp snooping",
         "show ip dhcp snooping binding",
         "show ip igmp snooping",
         "show storm-control",
         "show port-security",
     ],
+    "switch_nxos": [
+        "show version",
+        "show inventory",
+        "show interface status",
+        "show interface status err-disabled",
+        "show interface counters errors",
+        "show processes cpu",
+        "show processes memory",
+        "show logging | include LINK-3-UPDOWN",
+        "show logging | include LINEPROTO",
+        "show spanning-tree summary",
+        "show vlan brief",
+        "show port-channel summary",
+        "show ip interface brief",
+        "show ip arp",
+        "show mac address-table count",
+        "show cdp neighbors detail",
+        "show lldp neighbors detail",
+        "show environment",
+        "show clock",
+        "show users",
+        "show ip dhcp snooping",
+        "show ip dhcp snooping binding",
+        "show ip igmp snooping",
+    ],
     "port": [
-        "show run interface {port}",
-        "show run interfaces {port}",
-        "show run interfaces {port} status",
-        "show run interfaces {port} switchport",
-        "show run interfaces {port} counters",
-        "show run interfaces {port} counters errors",
-        "show run interfaces {port} transceiver details",
-        "show run interfaces {port} description",
+        "show running-config interface {port}",
+        "show interfaces {port}",
+        "show interfaces {port} status",
+        "show interfaces {port} switchport",
+        "show interfaces {port} counters",
+        "show interfaces {port} counters errors",
+        "show interfaces {port} transceiver details",
+        "show interfaces {port} description",
         "show mac address-table interface {port}",
         "show cdp neighbors {port} detail",
         "show lldp neighbors {port} detail",
@@ -243,10 +265,27 @@ RECOMMENDED_COMMANDS: dict[str, list[str]] = {
         "show spanning-tree interface {port} detail",
         "show power inline {port}",
         "show ip interface {port}",
-        "show etherchannel {port} port-channel",
+        "show interfaces {port} etherchannel",
         "show storm-control {port}",
         "show port-security interface {port}",
-        "show ip dhcp snooping binding interface {port}",
+        "show ip dhcp snooping binding | include {port}",
+    ],
+    "port_nxos": [
+        "show running-config interface {port}",
+        "show interface {port}",
+        "show interface {port} switchport",
+        "show interface {port} counters",
+        "show interface {port} counters errors",
+        "show interface {port} transceiver details",
+        "show interface {port} description",
+        "show mac address-table interface {port}",
+        "show cdp neighbors interface {port}",
+        "show lldp neighbors interface {port} detail",
+        "show spanning-tree interface {port}",
+        "show spanning-tree interface {port} detail",
+        "show ip interface {port}",
+        "show port-channel summary",
+        "show ip dhcp snooping binding | include {port}",
     ],
 }
 
@@ -334,7 +373,7 @@ def get_cached_detail(
     cached = collector_cache.get_detail(device.hostname, sticky=True)
     if cached is not None:
         logger.debug("Sticky cache hit for switch detail %s", device.hostname)
-        return cached
+        return _enrich_detail_macs_from_tracker(cached)
     logger.debug(
         "No cached detail for %s (ttl window %ss) — GUI should wait for poll/refresh",
         device.hostname,
@@ -434,7 +473,7 @@ def collect_switch_detail(
         cached = collector_cache.get_detail(device.hostname, sticky=True)
         if cached is not None:
             logger.debug("Cache hit for switch detail %s", device.hostname)
-            return cached
+            return _enrich_detail_macs_from_tracker(cached)
 
     logger.info("Live detail collect starting for %s (force_refresh=%s)", device.hostname, force_refresh)
     started = datetime.now(timezone.utc)
@@ -444,7 +483,9 @@ def collect_switch_detail(
     detail = SwitchDetail(
         **overview.model_dump(exclude={"ip_address"}),
         interfaces=interfaces,
-        recommended_commands=RECOMMENDED_COMMANDS["switch"],
+        recommended_commands=recommended_commands_for(
+            "switch", platform=overview.platform
+        ),
         stale_port_days_threshold=cfg.stale_port_days,
     )
     collector_cache.set_detail(device.hostname, detail, cfg.collector_cache_ttl_seconds)
@@ -483,7 +524,9 @@ def collect_switch_overview(
         detail = SwitchDetail(
             **overview.model_dump(exclude={"ip_address"}),
             interfaces=interfaces,
-            recommended_commands=RECOMMENDED_COMMANDS["switch"],
+            recommended_commands=recommended_commands_for(
+                "switch", platform=overview.platform
+            ),
             stale_port_days_threshold=cfg.stale_port_days,
         )
         collector_cache.set_detail(device.hostname, detail, cfg.collector_cache_ttl_seconds)
@@ -570,6 +613,8 @@ def _live_collect_overview_and_interfaces(
             "show interfaces counters errors",
             "show interfaces status err-disabled",
             "show ip arp",
+            # Cached for MAC/IP search fallback when a switch later goes unreachable.
+            "show mac address-table",
             cpu_cmd,
             "show ip dhcp snooping",
             "show ip igmp snooping",
@@ -583,6 +628,19 @@ def _live_collect_overview_and_interfaces(
             raw.get("show hostname", ""),
             version_text,
         )
+        # Classic IOS often lacks ``show hostname`` (NX-OS/XE command). Fall back
+        # to the SSH prompt, then a filtered read-only running-config include.
+        if not device_hostname:
+            device_hostname = _hostname_from_ssh_prompt(connection)
+        if not device_hostname:
+            run_host = _send_command(
+                connection,
+                "show running-config | include ^hostname",
+                cfg,
+                device.hostname,
+            )
+            raw["show running-config | include ^hostname"] = run_host
+            device_hostname = _extract_device_hostname(run_host, "")
 
         iface_text, interfaces = _resolve_interfaces_on_connection(
             connection,
@@ -632,6 +690,12 @@ def _live_collect_overview_and_interfaces(
             parse_errdisabled_reasons(raw.get("show interfaces counters errors", ""))
         )
 
+        # Parse MAC table before building port details so each port can show learned MACs.
+        mac_hits = parse_mac_table(
+            raw.get("show mac address-table", ""), device.hostname, device.ip
+        )
+        macs_by_port = _group_macs_by_port(mac_hits)
+
         port_details = [
             _to_port_detail(
                 iface,
@@ -642,6 +706,7 @@ def _live_collect_overview_and_interfaces(
                 errors_by_port,
                 errdisable_reasons,
                 cfg,
+                macs_by_port,
             )
             for iface in interfaces
         ]
@@ -659,23 +724,39 @@ def _live_collect_overview_and_interfaces(
         )
         poe_supported = bool(poe_by_port) or poe_available is not None or poe_used is not None
 
-        # Feed ARP rows into the global tracker index (client-side cache only).
+        # Feed ARP + MAC table into sticky tracker index (SQLite-backed fallback).
+        tracker_entries: list[TrackerIndexEntry] = []
         arp_rows = parse_arp_table(raw.get("show ip arp", ""), device.hostname, device.ip)
-        if arp_rows:
+        for row in arp_rows:
+            tracker_entries.append(
+                TrackerIndexEntry(
+                    hostname=str(row["hostname"] or device.hostname),
+                    switch_ip=str(row["switch_ip"] or device.ip),
+                    port=row.get("port"),
+                    vlan=row.get("vlan"),
+                    mac=row.get("mac"),
+                    ip=row.get("ip"),
+                    source="arp",
+                )
+            )
+        for hit in mac_hits:
+            tracker_entries.append(
+                TrackerIndexEntry(
+                    hostname=hit.hostname,
+                    switch_ip=hit.ip,
+                    port=hit.port,
+                    vlan=hit.vlan,
+                    mac=hit.mac,
+                    ip=None,
+                    source="mac",
+                )
+            )
+        if tracker_entries:
             collector_cache.extend_tracker_index(
-                [
-                    TrackerIndexEntry(
-                        hostname=str(row["hostname"] or device.hostname),
-                        switch_ip=str(row["switch_ip"] or device.ip),
-                        port=row.get("port"),
-                        vlan=row.get("vlan"),
-                        mac=row.get("mac"),
-                        ip=row.get("ip"),
-                        source="arp",
-                    )
-                    for row in arp_rows
-                ],
+                tracker_entries,
                 cfg.collector_cache_ttl_seconds,
+                merge_hosts=True,
+                replace_sources={"arp", "mac"},
             )
 
         overview = SwitchOverview(
@@ -728,14 +809,35 @@ def _live_collect_overview_and_interfaces(
                 pass
 
 
+def _split_live_vs_unreachable(
+    devices: list[DeviceInventoryItem],
+) -> tuple[list[DeviceInventoryItem], list[DeviceInventoryItem]]:
+    """Skip live SSH for switches already known unreachable in sticky cache."""
+    live: list[DeviceInventoryItem] = []
+    unreachable: list[DeviceInventoryItem] = []
+    for device in devices:
+        overview = collector_cache.get_overview(device.hostname, sticky=True)
+        if overview is not None and not overview.reachable:
+            unreachable.append(device)
+        else:
+            live.append(device)
+    return live, unreachable
+
+
 def lookup_mac_across_inventory(
     mac_normalized: str,
     device_credentials: DeviceCredentials,
     hostname: str | None = None,
     settings: Settings | None = None,
-) -> tuple[list[MacLookupHit], int, int, list[str]]:
-    """Search MAC table(s). Returns hits, queried count, failed count, errors."""
+) -> tuple[list[MacLookupHit], int, int, list[str], int, list[str]]:
+    """Cache-first MAC search; live SSH only on switches not known unreachable.
+
+    Returns:
+        hits, devices_queried, devices_failed, errors,
+        devices_from_cache, unreachable_hosts
+    """
     cfg = settings or get_settings()
+    bulk_cfg = _bulk_search_settings(cfg)
     devices = load_inventory()
     if hostname:
         devices = [d for d in devices if d.hostname.lower() == hostname.lower()]
@@ -743,28 +845,250 @@ def lookup_mac_across_inventory(
     hits: list[MacLookupHit] = []
     errors: list[str] = []
     failed = 0
+    from_cache_hosts: set[str] = set()
+    unreachable: list[str] = []
 
-    with ThreadPoolExecutor(max_workers=cfg.collector_max_workers) as pool:
-        futures = {
-            pool.submit(
-                _lookup_mac_on_device,
-                device,
-                mac_normalized,
-                device_credentials,
-                cfg,
-            ): device
-            for device in devices
+    # 1) Instant fleet-wide sticky cache (MAC + ARP from background polls).
+    for row in collector_cache.search_cached_mac(mac_normalized, hostname=hostname):
+        hits.append(
+            MacLookupHit(
+                hostname=row.hostname,
+                ip=row.switch_ip,
+                mac=row.mac or mac_normalized,
+                vlan=row.vlan,
+                port=row.port,
+                port_type=None,
+                from_cache=True,
+            )
+        )
+        from_cache_hosts.add(row.hostname.lower())
+
+    live_targets, known_down = _split_live_vs_unreachable(devices)
+    for device in known_down:
+        unreachable.append(device.hostname)
+        failed += 1
+        cached = _mac_hits_from_cache(mac_normalized, device.hostname, device.ip)
+        if cached:
+            from_cache_hosts.add(device.hostname.lower())
+            hits.extend(cached)
+            errors.append(
+                f"{device.hostname}: skipped live SSH (previously unreachable) — used cache"
+            )
+        else:
+            errors.append(
+                f"{device.hostname}: skipped live SSH (previously unreachable) — no cached MAC/ARP"
+            )
+
+    # 2) Live SSH only for reachable / never-collected switches (short bulk timeouts).
+    if live_targets:
+        logger.info(
+            "MAC lookup: cache hit host(s)=%s, live SSH targets=%s, skipped unreachable=%s",
+            len(from_cache_hosts),
+            len(live_targets),
+            len(known_down),
+        )
+        workers = max(1, min(cfg.collector_max_workers, len(live_targets)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    _lookup_mac_on_device,
+                    device,
+                    mac_normalized,
+                    device_credentials,
+                    bulk_cfg,
+                ): device
+                for device in live_targets
+            }
+            for future in as_completed(futures):
+                device = futures[future]
+                try:
+                    device_hits = future.result()
+                    hits.extend(device_hits)
+                    if device_hits:
+                        _cache_mac_hits(device_hits, cfg.collector_cache_ttl_seconds)
+                except Exception as exc:  # noqa: BLE001
+                    failed += 1
+                    friendly = _friendly_error(exc)
+                    errors.append(f"{device.hostname}: {friendly}")
+                    unreachable.append(device.hostname)
+                    cached = _mac_hits_from_cache(
+                        mac_normalized, device.hostname, device.ip
+                    )
+                    if cached:
+                        from_cache_hosts.add(device.hostname.lower())
+                        hits.extend(cached)
+                        logger.info(
+                            "MAC lookup SSH failed on %s (%s) — served %s hit(s) from cache",
+                            device.hostname,
+                            friendly,
+                            len(cached),
+                        )
+                    else:
+                        logger.warning(
+                            "MAC lookup SSH failed on %s (%s) — no cached MAC/ARP available",
+                            device.hostname,
+                            friendly,
+                        )
+
+    return (
+        _dedupe_mac_hits(hits),
+        len(devices),
+        failed,
+        errors,
+        len(from_cache_hosts),
+        unreachable,
+    )
+
+
+def _classify_mac_port_role(port: str | None) -> Literal["edge", "uplink", "svi", "unknown"]:
+    """Rank MAC-table ports for operators hunting the wall-jack / access edge."""
+    if not port:
+        return "unknown"
+    p = port.strip().lower().replace(" ", "")
+    if p.startswith("vlan") or p.startswith("vl"):
+        return "svi"
+    if (
+        p.startswith("po")
+        or "port-channel" in p
+        or p.startswith("peer-link")
+        or p.startswith("peerlink")
+    ):
+        return "uplink"
+    # Common access: Gi/Fa/Tw. Te/Eth are often uplinks on access switches but
+    # can also be the learned edge on aggregation — keep as edge so they sort
+    # above Po/SVI, after true copper access ports via _mac_hit_sort_key.
+    if re.match(r"^(gi|fa|tw|te|eth|ge|gige)", p):
+        return "edge"
+    return "unknown"
+
+
+def _mac_hit_sort_key(hit: MacLookupHit) -> tuple:
+    """Prefer access/edge ports, then live over cache, then hostname/port."""
+    role = hit.port_role or _classify_mac_port_role(hit.port)
+    port = (hit.port or "").strip().lower()
+    # Gi/Fa/Tw first among edge; Te/Eth next (often uplinks but still physical).
+    if role == "edge":
+        if re.match(r"^(gi|fa|tw)", port):
+            tier = 0
+        elif re.match(r"^(te|eth|ge)", port):
+            tier = 1
+        else:
+            tier = 2
+    elif role == "uplink":
+        tier = 3
+    elif role == "svi":
+        tier = 4
+    else:
+        tier = 5
+    return (
+        tier,
+        1 if hit.from_cache else 0,
+        hit.hostname.lower(),
+        port,
+        (hit.vlan or "").lower(),
+        hit.mac.lower(),
+    )
+
+
+def _enrich_mac_hits(hits: list[MacLookupHit]) -> list[MacLookupHit]:
+    """Attach Cisco device_hostname + port_role from sticky overview/cache."""
+    host_names: dict[str, str | None] = {}
+    for hit in hits:
+        key = hit.hostname.lower()
+        if key not in host_names:
+            overview = collector_cache.get_overview(hit.hostname, sticky=True)
+            host_names[key] = (
+                overview.device_hostname if overview is not None else None
+            )
+        hit.device_hostname = host_names[key]
+        hit.port_role = _classify_mac_port_role(hit.port)
+    return hits
+
+
+def _dedupe_mac_hits(hits: list[MacLookupHit]) -> list[MacLookupHit]:
+    seen: set[tuple[str, str, str, str]] = set()
+    out: list[MacLookupHit] = []
+    # Prefer live rows over cache duplicates for the same binding.
+    ordered = sorted(hits, key=lambda h: (1 if h.from_cache else 0))
+    for hit in ordered:
+        key = (
+            hit.hostname.lower(),
+            (hit.port or "").lower(),
+            (hit.vlan or "").lower(),
+            hit.mac.lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(hit)
+    _enrich_mac_hits(out)
+    out.sort(key=_mac_hit_sort_key)
+    return out
+
+
+def _bulk_search_settings(cfg: Settings) -> Settings:
+    """Clone settings with shorter SSH timeouts for fleet-wide searches."""
+    return cfg.model_copy(
+        update={
+            "ssh_timeout": max(1, int(cfg.ssh_bulk_timeout)),
+            "ssh_conn_timeout": max(1, int(cfg.ssh_bulk_conn_timeout)),
         }
-        for future in as_completed(futures):
-            device = futures[future]
-            try:
-                device_hits = future.result()
-                hits.extend(device_hits)
-            except Exception as exc:  # noqa: BLE001
-                failed += 1
-                errors.append(f"{device.hostname}: {_friendly_error(exc)}")
+    )
 
-    return hits, len(devices), failed, errors
+
+def _cache_mac_hits(hits: list[MacLookupHit], ttl_seconds: int) -> None:
+    if not hits:
+        return
+    entries = [
+        TrackerIndexEntry(
+            hostname=hit.hostname,
+            switch_ip=hit.ip,
+            port=hit.port,
+            vlan=hit.vlan,
+            mac=hit.mac,
+            ip=None,
+            source="mac",
+        )
+        for hit in hits
+    ]
+    # Keep live hits in memory for later fallback; durable snapshots come from collects.
+    collector_cache.extend_tracker_index(
+        entries,
+        ttl_seconds,
+        persist=False,
+        merge_hosts=True,
+    )
+
+
+def _mac_hits_from_cache(
+    mac_normalized: str,
+    hostname: str,
+    switch_ip: str,
+) -> list[MacLookupHit]:
+    """Build MacLookupHit rows from sticky local MAC/ARP cache for one switch."""
+    cached = collector_cache.search_cached_mac(mac_normalized, hostname=hostname)
+    out: list[MacLookupHit] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in cached:
+        mac = row.mac or ""
+        port = row.port or ""
+        vlan = row.vlan or ""
+        key = (mac.lower(), port.lower(), vlan.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            MacLookupHit(
+                hostname=hostname,
+                ip=row.switch_ip or switch_ip,
+                mac=mac,
+                vlan=row.vlan,
+                port=row.port,
+                port_type=None,
+                from_cache=True,
+            )
+        )
+    return out
 
 
 def get_running_config(
@@ -778,10 +1102,22 @@ def get_running_config(
     return raw.get("show running-config", "")
 
 
-def recommended_commands_for(context: str, port: str | None = None) -> list[str]:
+def recommended_commands_for(
+    context: str,
+    port: str | None = None,
+    platform: PlatformType | None = None,
+) -> list[str]:
+    """Return curated read-only show recommendations for switch or port context.
+
+    Platform selects IOS/XE vs NX-OS syntax. Invalid / mutating templates are
+    never included — only verified ``show`` commands.
+    """
+    is_nxos = platform == PlatformType.CISCO_NXOS
     if context == "port" and port:
-        return [cmd.format(port=port) for cmd in RECOMMENDED_COMMANDS["port"]]
-    return list(RECOMMENDED_COMMANDS["switch"])
+        templates = RECOMMENDED_COMMANDS["port_nxos" if is_nxos else "port"]
+        return [cmd.format(port=port) for cmd in templates]
+    key = "switch_nxos" if is_nxos else "switch"
+    return list(RECOMMENDED_COMMANDS[key])
 
 
 def validate_show_command(command: str) -> str:
@@ -899,7 +1235,9 @@ def probe_switch_connectivity(
         detail = SwitchDetail(
             **overview.model_dump(exclude={"ip_address"}),
             interfaces=interfaces,
-            recommended_commands=RECOMMENDED_COMMANDS["switch"],
+            recommended_commands=recommended_commands_for(
+                "switch", platform=overview.platform
+            ),
             stale_port_days_threshold=cfg.stale_port_days,
         )
         collector_cache.set_detail(device.hostname, detail, cfg.collector_cache_ttl_seconds)
@@ -1085,22 +1423,31 @@ def _run_commands(
 
 
 def _is_read_only(command: str) -> bool:
+    """Allow only ``show`` / ``ping``; reject mutating verbs even if buried in text.
+
+    Legitimate show forms such as ``show reload`` and ``show running-config`` are
+    permitted. Bare ``reload`` / ``write`` / ``configure`` are not.
+    """
     normalized = " ".join(command.strip().lower().split())
     if not normalized.startswith("show ") and not normalized.startswith("ping "):
         return False
     blocked = (
         "configure",
         "conf t",
-        "write",
-        "wr ",
         "copy running",
-        "reload",
+        "write memory",
+        "write erase",
         "erase",
         "delete",
         "clear ",
         "debug ",
     )
-    return not any(token in normalized for token in blocked)
+    if any(token in normalized for token in blocked):
+        return False
+    # Allow ``show reload`` (informational); reject any other command containing reload.
+    if "reload" in normalized and not normalized.startswith("show reload"):
+        return False
+    return True
 
 
 def _lookup_mac_on_device(
@@ -1110,18 +1457,37 @@ def _lookup_mac_on_device(
     cfg: Settings,
 ) -> list[MacLookupHit]:
     cisco_mac = _to_cisco_mac(mac_normalized)
-    command = f"show mac address-table | include {cisco_mac}"
-    # Broader fallback if include filter yields nothing useful
-    raw = _run_commands(
-        device,
-        [command, "show mac address-table"],
-        cfg,
-        device_credentials,
-    )
-    text = raw.get(command) or raw.get("show mac address-table", "")
-    if _is_cli_error(text) or not text.strip():
-        _log_raw_failure(device.hostname, "show mac address-table", text, "MAC lookup empty/error")
-    hits = parse_mac_table(text, device.hostname, device.ip)
+    filtered = f"show mac address-table | include {cisco_mac}"
+    # One SSH session: filtered show first, full table only if needed.
+    params = _device_params(device, cfg, device_credentials)
+    connection = None
+    try:
+        connection = ConnectHandler(**params)
+        text = _send_command(connection, filtered, cfg, device.hostname)
+        hits = _filter_mac_hits(
+            parse_mac_table(text, device.hostname, device.ip), mac_normalized
+        )
+        if hits:
+            return hits
+        text = _send_command(connection, "show mac address-table", cfg, device.hostname)
+        if _is_cli_error(text) or not text.strip():
+            _log_raw_failure(
+                device.hostname, "show mac address-table", text, "MAC lookup empty/error"
+            )
+        return _filter_mac_hits(
+            parse_mac_table(text, device.hostname, device.ip), mac_normalized
+        )
+    finally:
+        if "password" in params:
+            params["password"] = ""
+        if connection is not None:
+            try:
+                connection.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _filter_mac_hits(hits: list[MacLookupHit], mac_normalized: str) -> list[MacLookupHit]:
     needle = mac_normalized.lower()
     return [
         hit
@@ -1940,6 +2306,64 @@ def _format_connected_device(neighbor: dict[str, str | None]) -> str | None:
     return " ".join(parts)
 
 
+def _group_macs_by_port(mac_hits: list[MacLookupHit]) -> dict[str, list[str]]:
+    """Map normalized interface key → unique Cisco-format MACs from the MAC table."""
+    macs_by_port: dict[str, list[str]] = {}
+    for hit in mac_hits:
+        if not hit.port or not hit.mac:
+            continue
+        key = normalize_iface_key(hit.port)
+        if not key or key in {"cpu", "drop"} or key.startswith("vl"):
+            continue
+        bucket = macs_by_port.setdefault(key, [])
+        if hit.mac not in bucket:
+            bucket.append(hit.mac)
+    return macs_by_port
+
+
+def _enrich_detail_macs_from_tracker(detail: SwitchDetail) -> SwitchDetail:
+    """Fill empty ``mac_addresses`` on ports from the sticky MAC/ARP tracker cache."""
+    needs_enrichment = any(not iface.mac_addresses for iface in detail.interfaces)
+    if not needs_enrichment or not detail.interfaces:
+        return detail
+
+    host = detail.hostname.strip().lower()
+    macs_by_port: dict[str, list[str]] = {}
+    for row in collector_cache.get_tracker_index(sticky=True):
+        if row.hostname.strip().lower() != host:
+            continue
+        if not row.mac or not row.port:
+            continue
+        if row.source.lower() not in {"mac", "arp", "cache"}:
+            continue
+        key = normalize_iface_key(row.port)
+        if not key or key in {"cpu", "drop"} or key.startswith("vl"):
+            continue
+        mac = row.mac.strip().lower()
+        bucket = macs_by_port.setdefault(key, [])
+        if mac not in bucket:
+            bucket.append(mac)
+
+    if not macs_by_port:
+        return detail
+
+    updated: list[PortDetail] = []
+    changed = False
+    for iface in detail.interfaces:
+        if iface.mac_addresses:
+            updated.append(iface)
+            continue
+        macs = macs_by_port.get(normalize_iface_key(iface.port), [])
+        if macs:
+            changed = True
+            updated.append(iface.model_copy(update={"mac_addresses": list(macs)}))
+        else:
+            updated.append(iface)
+    if not changed:
+        return detail
+    return detail.model_copy(update={"interfaces": updated})
+
+
 def _to_port_detail(
     iface: InterfaceStatus,
     hostname: str,
@@ -1949,10 +2373,12 @@ def _to_port_detail(
     errors_by_port: dict[str, dict[str, int]],
     errdisable_reasons: dict[str, str],
     cfg: Settings,
+    macs_by_port: dict[str, list[str]] | None = None,
 ) -> PortDetail:
     key = normalize_iface_key(iface.port)
     vlan = vlan_by_port.get(key) or iface.vlan
     neighbor = neighbors_by_port.get(key)
+    port_macs = list((macs_by_port or {}).get(key, []))
     protocol_raw = neighbor.get("protocol") if neighbor else None
     protocol: Literal["cdp", "lldp"] | None = (
         protocol_raw if protocol_raw in ("cdp", "lldp") else None
@@ -2034,6 +2460,7 @@ def _to_port_detail(
         port=iface.port,
         status=status,
         vlan=vlan,
+        mac_addresses=port_macs,
         duplex=iface.duplex,
         speed=iface.speed,
         type=iface.type,
@@ -2091,6 +2518,27 @@ def _map_port_status(raw: str) -> PortOperationalStatus:
     return PortOperationalStatus.UNKNOWN
 
 
+def _looks_like_device_hostname(token: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,63}", token))
+
+
+def _hostname_from_ssh_prompt(connection: Any) -> str | None:
+    """Read-only hostname from the Netmiko session prompt (works on classic IOS)."""
+    try:
+        prompt = str(connection.find_prompt() or "").strip()
+    except Exception:  # noqa: BLE001
+        return None
+    if not prompt:
+        return None
+    # Strip common prompt suffixes / privilege markers: "eyok2-000a-swa-01#"
+    token = prompt.rstrip("#> ").split()[-1]
+    token = token.split(":")[-1]  # user:host or VRF-style prefixes
+    token = token.strip("()[]")
+    if _looks_like_device_hostname(token):
+        return token
+    return None
+
+
 def _extract_device_hostname(hostname_text: str, version_text: str = "") -> str | None:
     """Parse the switch's configured hostname from ``show hostname`` / ``show version``."""
     text = normalize_cli_text(hostname_text or "")
@@ -2110,7 +2558,7 @@ def _extract_device_hostname(hostname_text: str, version_text: str = "") -> str 
                 continue
         # Drop prompt markers / trailing junk; take first token.
         token = line.split()[0].rstrip("#>")
-        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,63}", token):
+        if _looks_like_device_hostname(token):
             return token
 
     version = normalize_cli_text(version_text or "")
@@ -2122,7 +2570,7 @@ def _extract_device_hostname(hostname_text: str, version_text: str = "") -> str 
         match = re.search(pattern, version)
         if match:
             token = match.group(1).strip().rstrip("#>")
-            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,63}", token):
+            if _looks_like_device_hostname(token):
                 return token
     return None
 

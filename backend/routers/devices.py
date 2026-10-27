@@ -168,7 +168,24 @@ async def device_recommended_commands(
     current_user: UserInfo = Depends(get_current_user),
 ) -> list[str]:
     context = "port" if port else "switch"
-    return cisco_collector.recommended_commands_for(context, port=port)
+    try:
+        devices = load_inventory()
+    except InventoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
+        ) from exc
+    platform = next(
+        (d.platform for d in devices if d.hostname.lower() == hostname.lower()),
+        None,
+    )
+    if platform is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Device '{hostname}' not found in inventory",
+        )
+    return cisco_collector.recommended_commands_for(
+        context, port=port, platform=platform
+    )
 
 
 @router.post("/{hostname}/exec-command", response_model=ExecCommandResponse)

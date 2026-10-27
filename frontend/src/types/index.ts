@@ -34,6 +34,8 @@ export interface PortDetail {
   status: PortStatus;
   /** Access VLAN ID, "trunk", "trunk (native N)", or "routed". */
   vlan?: string | null;
+  /** Learned unicast MACs on this port from the cached MAC address table. */
+  mac_addresses?: string[];
   duplex?: string | null;
   speed?: string | null;
   type?: string | null;
@@ -134,6 +136,11 @@ export interface MacLookupHit {
   vlan?: string | null;
   port?: string | null;
   port_type?: string | null;
+  from_cache?: boolean;
+  /** Real Cisco hostname from show hostname (when known). */
+  device_hostname?: string | null;
+  /** edge = likely wall-jack; uplink = Po/Peer-Link flood; svi = Vlan ARP */
+  port_role?: "edge" | "uplink" | "svi" | "unknown";
 }
 
 export interface MacLookupResponse {
@@ -142,6 +149,10 @@ export interface MacLookupResponse {
   hits: MacLookupHit[];
   devices_queried: number;
   devices_failed: number;
+  devices_from_cache?: number;
+  cache_fallback_used?: boolean;
+  unreachable_hosts?: string[];
+  warning?: string | null;
   errors: string[];
 }
 
@@ -156,6 +167,7 @@ export interface TrackerHit {
   neighbor_hostname?: string | null;
   source: "mac" | "arp" | "neighbor" | "cache";
   detail?: string | null;
+  from_cache?: boolean;
 }
 
 export interface TrackerSearchResponse {
@@ -164,6 +176,10 @@ export interface TrackerSearchResponse {
   hits: TrackerHit[];
   devices_queried: number;
   devices_failed: number;
+  devices_from_cache?: number;
+  cache_fallback_used?: boolean;
+  unreachable_hosts?: string[];
+  warning?: string | null;
   errors: string[];
   searched_at: string;
 }

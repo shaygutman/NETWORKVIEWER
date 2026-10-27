@@ -95,6 +95,8 @@ class PortDetail(BaseModel):
     status: PortOperationalStatus
     # Access VLAN ID, "trunk", or "routed" from show interfaces status / switchport.
     vlan: str | None = None
+    # Learned unicast MACs on this port from ``show mac address-table`` (cached).
+    mac_addresses: list[str] = Field(default_factory=list)
     duplex: str | None = None
     speed: str | None = None
     type: str | None = None
@@ -204,6 +206,11 @@ class MacLookupHit(BaseModel):
     vlan: str | None = None
     port: str | None = None
     port_type: str | None = None
+    from_cache: bool = False
+    # Real Cisco hostname from ``show hostname`` (when known from collect).
+    device_hostname: str | None = None
+    # edge = likely access port; uplink = Po/Peer-Link/trunk flood; svi = Vlan ARP/SVI
+    port_role: Literal["edge", "uplink", "svi", "unknown"] = "unknown"
 
 
 class MacLookupResponse(BaseModel):
@@ -212,6 +219,10 @@ class MacLookupResponse(BaseModel):
     hits: list[MacLookupHit]
     devices_queried: int
     devices_failed: int
+    devices_from_cache: int = 0
+    cache_fallback_used: bool = False
+    unreachable_hosts: list[str] = Field(default_factory=list)
+    warning: str | None = None
     errors: list[str] = Field(default_factory=list)
 
 
@@ -318,6 +329,7 @@ class TrackerHit(BaseModel):
     neighbor_hostname: str | None = None
     source: Literal["mac", "arp", "neighbor", "cache"] = "cache"
     detail: str | None = None
+    from_cache: bool = False
 
 
 class TrackerSearchResponse(BaseModel):
@@ -326,5 +338,9 @@ class TrackerSearchResponse(BaseModel):
     hits: list[TrackerHit] = Field(default_factory=list)
     devices_queried: int = 0
     devices_failed: int = 0
+    devices_from_cache: int = 0
+    cache_fallback_used: bool = False
+    unreachable_hosts: list[str] = Field(default_factory=list)
+    warning: str | None = None
     errors: list[str] = Field(default_factory=list)
     searched_at: datetime

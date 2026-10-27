@@ -7,6 +7,7 @@ process restarts and is independent of switch reboot uptime.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import threading
@@ -17,6 +18,9 @@ from backend.config import get_settings
 from backend.models.schemas import SwitchDetail, SwitchOverview
 
 logger = logging.getLogger(__name__)
+
+# Snapshot kind for durable MAC/ARP bindings used by search fallback.
+MAC_ARP_KIND = "mac_arp"
 
 _lock = threading.RLock()
 _initialized = False
@@ -278,3 +282,65 @@ def load_all_snapshots() -> tuple[list[SwitchOverview], list[SwitchDetail]]:
         len(details),
     )
     return overviews, details
+
+
+def save_mac_arp_snapshot(
+    hostname: str,
+    entries: list[dict[str, str | None]],
+    collected_at: datetime | None = None,
+) -> None:
+    """Persist the latest MAC/ARP binding set for one switch (search fallback)."""
+    ensure_cache_db()
+    host = hostname.strip().lower()
+    now = _utc_now()
+    collected = collected_at or now
+    payload = json.dumps({"entries": entries}, separators=(",", ":"))
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO switch_snapshots (hostname, kind, payload_json, collected_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(hostname, kind) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    collected_at = excluded.collected_at,
+                    updated_at = excluded.updated_at
+                """,
+                (host, MAC_ARP_KIND, payload, _iso(collected), _iso(now)),
+            )
+            conn.commit()
+
+
+def load_all_mac_arp_snapshots() -> list[tuple[str, list[dict[str, str | None]], datetime | None]]:
+    """Load durable MAC/ARP bindings for every switch (cold-start hydration)."""
+    ensure_cache_db()
+    out: list[tuple[str, list[dict[str, str | None]], datetime | None]] = []
+    with _lock:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT hostname, payload_json, collected_at
+                FROM switch_snapshots
+                WHERE kind = ?
+                """,
+                (MAC_ARP_KIND,),
+            ).fetchall()
+    for row in rows:
+        try:
+            data = json.loads(row["payload_json"])
+            entries = data.get("entries") if isinstance(data, dict) else data
+            if not isinstance(entries, list):
+                continue
+            cleaned: list[dict[str, str | None]] = []
+            for item in entries:
+                if isinstance(item, dict):
+                    cleaned.append({str(k): (None if v is None else str(v)) for k, v in item.items()})
+            out.append((str(row["hostname"]), cleaned, _parse_iso(row["collected_at"])))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Skipping corrupt mac_arp snapshot for %s: %s",
+                row["hostname"],
+                exc,
+            )
+    logger.info("Hydrated MAC/ARP snapshots for %s switch(es) from SQLite", len(out))
+    return out

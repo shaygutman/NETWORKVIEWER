@@ -15,6 +15,7 @@ import { CliCommandsModal } from "./CliCommandsModal";
 import { ConfigDiff } from "./ConfigDiff";
 import { MacLookup } from "./MacLookup";
 import { PortTable } from "./PortTable";
+import { SearchCoverageBanner } from "./SearchCoverageBanner";
 import { SwitchCard } from "./SwitchCard";
 
 interface DashboardProps {
@@ -298,56 +299,73 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         )}
 
         {trackerResult && (
-          <div className="mb-4 noc-panel p-4">
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="mb-4 noc-panel overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-4 pt-4">
               <p className="text-sm text-slate-200">
                 Global search <span className="font-mono text-cyan-300">{trackerResult.query}</span>
                 {" · "}
                 type={trackerResult.query_type}
                 {" · "}
                 {trackerResult.hits.length} hit(s)
+                {trackerResult.devices_failed > 0
+                  ? ` · ${trackerResult.devices_failed} unreachable`
+                  : ""}
+                {(trackerResult.devices_from_cache ?? 0) > 0
+                  ? ` · ${trackerResult.devices_from_cache} from cache`
+                  : ""}
               </p>
               <button type="button" className="noc-btn-ghost text-xs" onClick={() => setTrackerResult(null)}>
                 Dismiss
               </button>
             </div>
-            {trackerResult.hits.length === 0 ? (
-              <p className="text-sm text-noc-muted">No bindings found across the fleet.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-left text-sm">
-                  <thead className="text-xs uppercase text-slate-400">
-                    <tr>
-                      <th className="px-2 py-1">Switch</th>
-                      <th className="px-2 py-1">Port</th>
-                      <th className="px-2 py-1">VLAN</th>
-                      <th className="px-2 py-1">MAC</th>
-                      <th className="px-2 py-1">IP</th>
-                      <th className="px-2 py-1">Neighbor</th>
-                      <th className="px-2 py-1">Source</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {trackerResult.hits.map((hit, idx) => (
-                      <tr
-                        key={`${hit.hostname}-${hit.port}-${hit.mac}-${hit.ip}-${idx}`}
-                        className="cursor-pointer border-t border-noc-border/60 hover:bg-cyan-500/5"
-                        onClick={() => jumpToTrackerHit(hit)}
-                        title="Open switch and highlight port"
-                      >
-                        <td className="px-2 py-1.5 font-mono text-cyan-200">{hit.hostname}</td>
-                        <td className="px-2 py-1.5 font-mono">{hit.port || "—"}</td>
-                        <td className="px-2 py-1.5 font-mono">{hit.vlan || "—"}</td>
-                        <td className="px-2 py-1.5 font-mono">{hit.mac || "—"}</td>
-                        <td className="px-2 py-1.5 font-mono">{hit.ip || "—"}</td>
-                        <td className="px-2 py-1.5">{hit.neighbor_hostname || "—"}</td>
-                        <td className="px-2 py-1.5 text-xs uppercase text-noc-muted">{hit.source}</td>
+            <div className="p-4 pt-2">
+              {trackerResult.hits.length === 0 ? (
+                <p className="text-sm text-noc-muted">No bindings found across the fleet.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-left text-sm">
+                    <thead className="text-xs uppercase text-slate-400">
+                      <tr>
+                        <th className="px-2 py-1">Switch</th>
+                        <th className="px-2 py-1">Port</th>
+                        <th className="px-2 py-1">VLAN</th>
+                        <th className="px-2 py-1">MAC</th>
+                        <th className="px-2 py-1">IP</th>
+                        <th className="px-2 py-1">Neighbor</th>
+                        <th className="px-2 py-1">Source</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                    </thead>
+                    <tbody>
+                      {trackerResult.hits.map((hit, idx) => (
+                        <tr
+                          key={`${hit.hostname}-${hit.port}-${hit.mac}-${hit.ip}-${idx}`}
+                          className="cursor-pointer border-t border-noc-border/60 hover:bg-cyan-500/5"
+                          onClick={() => jumpToTrackerHit(hit)}
+                          title="Open switch and highlight port"
+                        >
+                          <td className="px-2 py-1.5 font-mono text-cyan-200">{hit.hostname}</td>
+                          <td className="px-2 py-1.5 font-mono">{hit.port || "—"}</td>
+                          <td className="px-2 py-1.5 font-mono">{hit.vlan || "—"}</td>
+                          <td className="px-2 py-1.5 font-mono">{hit.mac || "—"}</td>
+                          <td className="px-2 py-1.5 font-mono">{hit.ip || "—"}</td>
+                          <td className="px-2 py-1.5">{hit.neighbor_hostname || "—"}</td>
+                          <td className="px-2 py-1.5 text-xs uppercase text-noc-muted">
+                            {hit.from_cache ? "cache" : hit.source}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+            <SearchCoverageBanner
+              warning={trackerResult.warning}
+              devicesFailed={trackerResult.devices_failed}
+              devicesFromCache={trackerResult.devices_from_cache}
+              unreachableHosts={trackerResult.unreachable_hosts}
+              errors={trackerResult.errors}
+            />
           </div>
         )}
 

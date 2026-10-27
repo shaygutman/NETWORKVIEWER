@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     # Keep conn/read timeouts short so offline devices fail fast.
     ssh_timeout: int = 5
     ssh_conn_timeout: int = 3
+    # Bulk fleet search (MAC lookup / global tracker): fail unreachable hosts
+    # even faster so one dead switch cannot stall the whole response.
+    ssh_bulk_timeout: int = 4
+    ssh_bulk_conn_timeout: int = 2
     collector_max_workers: int = 8
     # Soft freshness window for snapshots (seconds). GUI reads are sticky and
     # do not SSH; background polling refreshes entries within this window.

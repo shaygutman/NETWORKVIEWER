@@ -75,6 +75,7 @@ class CollectorCache:
                 cache_store.ensure_cache_db()
                 self._port_down_since = cache_store.load_port_down_since()
                 overviews, details = cache_store.load_all_snapshots()
+                mac_arp_rows = cache_store.load_all_mac_arp_snapshots()
             except Exception as exc:  # noqa: BLE001
                 logger.error("Failed to hydrate collector cache from SQLite: %s", exc)
                 self._hydrated = True
@@ -106,13 +107,35 @@ class CollectorCache:
                 self._overviews[key] = _CacheEntry(
                     value=overview, expires_at=now + ttl, updated_at=now
                 )
-                self._ingest_tracker_from_detail(detail, ttl)
+            # Restore durable MAC/ARP first, then layer CDP/LLDP neighbors.
+            for hostname, entries, collected_at in mac_arp_rows:
+                restored = [
+                    TrackerIndexEntry(
+                        hostname=str(item.get("hostname") or hostname),
+                        switch_ip=str(item.get("switch_ip") or ""),
+                        port=item.get("port"),
+                        vlan=item.get("vlan"),
+                        mac=item.get("mac"),
+                        ip=item.get("ip"),
+                        neighbor_hostname=item.get("neighbor_hostname"),
+                        source=str(item.get("source") or "cache"),
+                        updated_at=collected_at or datetime.now(timezone.utc),
+                    )
+                    for item in entries
+                ]
+                if restored:
+                    self.extend_tracker_index(restored, ttl, persist=False)
+            for detail in details:
+                self._ingest_tracker_from_detail(
+                    detail, ttl, persist=False, merge_hosts=True
+                )
             self._hydrated = True
             logger.info(
-                "In-memory cache hydrated: %s overview(s), %s detail(s), %s down-port(s)",
+                "In-memory cache hydrated: %s overview(s), %s detail(s), %s down-port(s), %s tracker row(s)",
                 len(self._overviews),
                 len(self._details),
                 len(self._port_down_since),
+                len(self._tracker_index),
             )
 
     def get_overview(self, hostname: str, *, sticky: bool = True) -> SwitchOverview | None:
@@ -235,24 +258,115 @@ class CollectorCache:
         with self._lock:
             self._tracker_index = list(entries)
             self._tracker_expires_at = time.monotonic() + max(1, int(ttl_seconds))
+        self._persist_tracker_hosts({e.hostname for e in entries})
 
-    def extend_tracker_index(self, entries: list[TrackerIndexEntry], ttl_seconds: int) -> None:
+    def extend_tracker_index(
+        self,
+        entries: list[TrackerIndexEntry],
+        ttl_seconds: int,
+        *,
+        persist: bool = True,
+        merge_hosts: bool = False,
+        replace_sources: set[str] | None = None,
+    ) -> None:
+        """Update tracker rows.
+
+        - ``merge_hosts=False`` (default): drop all prior rows for those hosts.
+        - ``merge_hosts=True``: keep prior rows (optionally drop only
+          ``replace_sources`` for those hosts before appending).
+        """
         with self._lock:
-            if time.monotonic() > self._tracker_expires_at:
-                self._tracker_index = []
-            # Drop prior rows for the same switches being refreshed.
+            # Sticky index: do not wipe on TTL — searches need last-good data.
             hosts = {e.hostname.lower() for e in entries}
-            self._tracker_index = [
-                row for row in self._tracker_index if row.hostname.lower() not in hosts
-            ]
+            if not merge_hosts:
+                self._tracker_index = [
+                    row for row in self._tracker_index if row.hostname.lower() not in hosts
+                ]
+            elif replace_sources:
+                sources = {s.lower() for s in replace_sources}
+                self._tracker_index = [
+                    row
+                    for row in self._tracker_index
+                    if not (
+                        row.hostname.lower() in hosts and row.source.lower() in sources
+                    )
+                ]
             self._tracker_index.extend(entries)
             self._tracker_expires_at = time.monotonic() + max(1, int(ttl_seconds))
+        if persist:
+            self._persist_tracker_hosts({e.hostname for e in entries})
 
-    def get_tracker_index(self) -> list[TrackerIndexEntry]:
+    def get_tracker_index(self, *, sticky: bool = True) -> list[TrackerIndexEntry]:
+        """Return fleet MAC/ARP/neighbor bindings. Sticky by default for search fallback."""
         with self._lock:
-            if time.monotonic() > self._tracker_expires_at:
+            if not sticky and time.monotonic() > self._tracker_expires_at:
                 return []
             return list(self._tracker_index)
+
+    def search_cached_mac(
+        self,
+        mac_normalized: str,
+        hostname: str | None = None,
+    ) -> list[TrackerIndexEntry]:
+        """Match a normalized MAC against sticky cached bindings."""
+        needle = (
+            mac_normalized.strip()
+            .lower()
+            .replace(".", "")
+            .replace(":", "")
+            .replace("-", "")
+            .replace(" ", "")
+        )
+        if not needle:
+            return []
+        hits: list[TrackerIndexEntry] = []
+        for row in self.get_tracker_index(sticky=True):
+            if hostname and row.hostname.lower() != hostname.lower():
+                continue
+            if not row.mac:
+                continue
+            row_mac = (
+                row.mac.lower()
+                .replace(".", "")
+                .replace(":", "")
+                .replace("-", "")
+                .replace(" ", "")
+            )
+            if needle in row_mac:
+                hits.append(row)
+        return hits
+
+    def _persist_tracker_hosts(self, hostnames: set[str]) -> None:
+        """Write latest in-memory bindings for the given hosts to SQLite."""
+        if not hostnames:
+            return
+        wanted = {h.strip().lower() for h in hostnames if h and h.strip()}
+        with self._lock:
+            by_host: dict[str, list[TrackerIndexEntry]] = {}
+            for row in self._tracker_index:
+                key = row.hostname.strip().lower()
+                if key not in wanted:
+                    continue
+                by_host.setdefault(key, []).append(row)
+        for host, rows in by_host.items():
+            payload: list[dict[str, str | None]] = [
+                {
+                    "hostname": row.hostname,
+                    "switch_ip": row.switch_ip,
+                    "port": row.port,
+                    "vlan": row.vlan,
+                    "mac": row.mac,
+                    "ip": row.ip,
+                    "neighbor_hostname": row.neighbor_hostname,
+                    "source": row.source,
+                }
+                for row in rows
+            ]
+            collected = max((row.updated_at for row in rows), default=datetime.now(timezone.utc))
+            try:
+                cache_store.save_mac_arp_snapshot(host, payload, collected)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist MAC/ARP cache for %s: %s", host, exc)
 
     def invalidate(self, hostname: str | None = None) -> None:
         with self._lock:
@@ -269,7 +383,14 @@ class CollectorCache:
                 row for row in self._tracker_index if row.hostname.lower() != key
             ]
 
-    def _ingest_tracker_from_detail(self, detail: SwitchDetail, ttl_seconds: int) -> None:
+    def _ingest_tracker_from_detail(
+        self,
+        detail: SwitchDetail,
+        ttl_seconds: int,
+        *,
+        persist: bool = True,
+        merge_hosts: bool = True,
+    ) -> None:
         entries: list[TrackerIndexEntry] = []
         for iface in detail.interfaces:
             if iface.neighbor_hostname or iface.neighbor_ip:
@@ -286,7 +407,13 @@ class CollectorCache:
                     )
                 )
         if entries:
-            self.extend_tracker_index(entries, ttl_seconds)
+            self.extend_tracker_index(
+                entries,
+                ttl_seconds,
+                persist=persist,
+                merge_hosts=merge_hosts,
+                replace_sources={"neighbor"} if merge_hosts else None,
+            )
 
     def _get(
         self,
