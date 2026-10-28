@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Literal
@@ -177,6 +178,71 @@ class SwitchDetail(SwitchOverview):
     interfaces: list[PortDetail] = Field(default_factory=list)
     recommended_commands: list[str] = Field(default_factory=list)
     stale_port_days_threshold: int = 30
+
+
+class AddSwitchRequest(BaseModel):
+    """Register a switch into inventory after a read-only SSH connectivity check.
+
+    SSH uses the caller's login-session credentials only — never store passwords
+    in inventory or in this request body.
+    """
+
+    address: str = Field(
+        min_length=1,
+        max_length=253,
+        description="Management IP or DNS name of the switch",
+    )
+    hostname: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Optional inventory id (defaults to sw-<ip> or sanitized DNS)",
+    )
+    platform: PlatformType | None = Field(
+        default=None,
+        description="Optional starting platform; auto-detected from show version when omitted",
+    )
+    site: str | None = Field(default=None, max_length=64)
+    role: str | None = Field(default=None, max_length=64)
+
+    @field_validator("address")
+    @classmethod
+    def _normalize_address(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Switch address is required")
+        if any(ch.isspace() for ch in cleaned):
+            raise ValueError("Address must not contain spaces")
+        return cleaned
+
+    @field_validator("hostname")
+    @classmethod
+    def _normalize_hostname(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", cleaned):
+            raise ValueError(
+                "Hostname must be 1–64 chars: letters, digits, dot, underscore, hyphen"
+            )
+        return cleaned
+
+
+class AddSwitchResponse(BaseModel):
+    """Result of adding a switch after a successful read-only SSH probe."""
+
+    hostname: str
+    ip: str
+    platform: PlatformType
+    site: str | None = None
+    role: str | None = None
+    device_hostname: str | None = None
+    model: str | None = None
+    firmware: str | None = None
+    reachable: bool
+    overview: SwitchOverview
+    message: str
 
 
 class MacLookupRequest(BaseModel):

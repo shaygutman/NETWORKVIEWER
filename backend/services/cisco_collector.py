@@ -22,6 +22,7 @@ from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutExc
 from backend.auth.session_store import DeviceCredentials
 from backend.config import Settings, get_settings
 from backend.models.schemas import (
+    AddSwitchResponse,
     ConnectivityProbeResult,
     DeviceInventoryItem,
     ExecCommandResponse,
@@ -34,7 +35,14 @@ from backend.models.schemas import (
     SwitchOverview,
 )
 from backend.services.collector_cache import TrackerIndexEntry, collector_cache
-from backend.services.inventory import load_inventory
+from backend.services.inventory import (
+    InventoryConflictError,
+    InventoryError,
+    add_device_to_inventory,
+    default_inventory_hostname,
+    find_inventory_conflict,
+    load_inventory,
+)
 from backend.services.poe_health import (
     classify_neighbor,
     detect_duplex_mismatch,
@@ -1208,6 +1216,119 @@ def execute_show_command(
         success=True,
         error=None,
         executed_at=executed_at,
+    )
+
+
+def resolve_management_address(address: str) -> str:
+    """Resolve a management IP or DNS name to an IPv4 address (read-only DNS)."""
+    cleaned = address.strip()
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", cleaned):
+        octets = [int(part) for part in cleaned.split(".")]
+        if any(part > 255 for part in octets):
+            raise CollectorError(f"Invalid IPv4 address: {cleaned}")
+        return cleaned
+    try:
+        import socket
+
+        infos = socket.getaddrinfo(cleaned, None, family=socket.AF_INET)
+    except OSError as exc:
+        raise CollectorError(f"Could not resolve '{cleaned}' to an IPv4 address: {exc}") from exc
+    if not infos:
+        raise CollectorError(f"Could not resolve '{cleaned}' to an IPv4 address")
+    return str(infos[0][4][0])
+
+
+def register_new_switch(
+    address: str,
+    device_credentials: DeviceCredentials,
+    *,
+    hostname: str | None = None,
+    platform: PlatformType | None = None,
+    site: str | None = None,
+    role: str | None = None,
+    settings: Settings | None = None,
+) -> AddSwitchResponse:
+    """Probe a switch with read-only show commands, then append it to inventory.
+
+    Uses the caller's login-session credentials only. Never stores passwords and
+    never enters switch configuration mode. On success the sticky collector cache
+    is warmed so the GUI can show the new card without a process restart.
+    """
+    cfg = settings or get_settings()
+    _require_session_credentials(device_credentials)
+
+    resolved_ip = resolve_management_address(address)
+    inventory_hostname = (hostname or "").strip() or default_inventory_hostname(
+        address, resolved_ip
+    )
+
+    conflict = find_inventory_conflict(inventory_hostname, resolved_ip)
+    if conflict is not None:
+        raise InventoryConflictError(
+            f"Switch already in inventory as '{conflict.hostname}' ({conflict.ip})"
+        )
+
+    candidate = DeviceInventoryItem(
+        hostname=inventory_hostname,
+        ip=resolved_ip,
+        platform=platform or PlatformType.CISCO_IOS,
+        credential_group="session",
+        site=site,
+        role=role,
+        enabled=True,
+    )
+
+    # Live read-only collect (show version / interfaces / MAC / ARP / neighbors…).
+    overview, interfaces = _live_collect_overview_and_interfaces(
+        candidate, device_credentials, cfg
+    )
+    if not overview.reachable:
+        raise CollectorError(
+            overview.error
+            or f"SSH connectivity check failed for {inventory_hostname} ({resolved_ip})"
+        )
+
+    # Persist detected platform from show version (still inventory metadata only).
+    saved = candidate.model_copy(update={"platform": overview.platform})
+    try:
+        add_device_to_inventory(saved)
+    except InventoryError:
+        raise
+
+    detail = SwitchDetail(
+        **overview.model_dump(exclude={"ip_address"}),
+        hostname=saved.hostname,
+        ip=saved.ip,
+        platform=saved.platform,
+        interfaces=interfaces,
+        recommended_commands=recommended_commands_for(
+            "switch", platform=saved.platform
+        ),
+        stale_port_days_threshold=cfg.stale_port_days,
+    )
+    collector_cache.set_detail(
+        saved.hostname, detail, cfg.collector_cache_ttl_seconds
+    )
+
+    return AddSwitchResponse(
+        hostname=saved.hostname,
+        ip=saved.ip,
+        platform=saved.platform,
+        site=saved.site,
+        role=saved.role,
+        device_hostname=overview.device_hostname,
+        model=overview.model,
+        firmware=overview.firmware,
+        reachable=True,
+        overview=SwitchOverview(**detail.model_dump(exclude={
+            "interfaces",
+            "recommended_commands",
+            "stale_port_days_threshold",
+            "ip_address",
+        })),
+        message=(
+            f"Added {saved.hostname} ({saved.ip}) after successful read-only SSH probe"
+        ),
     )
 
 

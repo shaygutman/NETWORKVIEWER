@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import ensure_runtime_dirs, get_settings
 from backend.models.schemas import HealthResponse
-from backend.routers import audit, auth, baseline, devices, mac, tracker
+from backend.routers import audit, auth, baseline, devices, mac, switches, tracker
 from backend.services.background_poller import (
     poller_status,
     start_background_poller,
@@ -67,6 +67,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth.router, prefix="/api")
     app.include_router(devices.router, prefix="/api")
+    app.include_router(switches.router, prefix="/api")
     app.include_router(mac.router, prefix="/api")
     app.include_router(tracker.router, prefix="/api")
     app.include_router(baseline.router, prefix="/api")

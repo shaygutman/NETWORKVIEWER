@@ -1,4 +1,6 @@
 import type {
+  AddSwitchRequest,
+  AddSwitchResponse,
   AuthToken,
   BaselineDiffResponse,
   ConnectivityProbeResult,
@@ -103,6 +105,16 @@ export const api = {
   },
   listDevices() {
     return request<DeviceSummary[]>("/api/devices");
+  },
+  /**
+   * Add a switch: read-only SSH probe with session credentials, then append inventory.
+   * Also available as POST /api/switches.
+   */
+  addSwitch(payload: AddSwitchRequest) {
+    return request<AddSwitchResponse>("/api/switches", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
   },
   /** Fleet overview. Default = local cache only (no SSH). refresh=true = on-demand live collect. */
   overview(refresh = false) {

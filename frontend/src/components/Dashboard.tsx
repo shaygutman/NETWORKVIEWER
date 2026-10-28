@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { api, clearSession } from "../api/client";
 import type {
+  AddSwitchResponse,
   ConnectivityProbeResult,
   DashboardTab,
   DeviceSummary,
@@ -11,6 +12,7 @@ import type {
   TrackerSearchResponse,
   UserInfo,
 } from "../types";
+import { AddSwitchModal } from "./AddSwitchModal";
 import { CliCommandsModal } from "./CliCommandsModal";
 import { ConfigDiff } from "./ConfigDiff";
 import { MacLookup } from "./MacLookup";
@@ -45,6 +47,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   } | null>(null);
   const [probeResult, setProbeResult] = useState<ConnectivityProbeResult | null>(null);
   const [probing, setProbing] = useState(false);
+  const [showAddSwitch, setShowAddSwitch] = useState(false);
 
   const reachableCount = useMemo(
     () => overviews.filter((item) => item.reachable).length,
@@ -205,6 +208,17 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     onLogout();
   }
 
+  async function handleSwitchAdded(result: AddSwitchResponse) {
+    setShowAddSwitch(false);
+    setError(null);
+    setTab("switches");
+    setSelectedHost(result.hostname);
+    // Cache was warmed by the add probe — refresh fleet cards without a full live collect.
+    await refreshFleet(false);
+    setSelectedHost(result.hostname);
+    await loadDetail(result.hostname, false);
+  }
+
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-20 border-b border-noc-border/80 bg-slate-950/80 backdrop-blur">
@@ -243,6 +257,13 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
               />
               Auto-refresh
             </label>
+            <button
+              className="noc-btn"
+              onClick={() => setShowAddSwitch(true)}
+              title="Add a switch by IP or DNS (read-only SSH check, then inventory)"
+            >
+              Add Switch
+            </button>
             <button
               className="noc-btn-ghost"
               onClick={() => void refreshFleet(false)}
@@ -372,9 +393,25 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         {tab === "switches" && (
           <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
             <section className="space-y-3">
+              <div className="noc-panel flex items-center justify-between gap-2 px-3 py-2">
+                <span className="text-sm font-medium text-slate-200">
+                  Switches
+                  <span className="ml-2 text-xs font-normal text-noc-muted">
+                    {overviews.length || devices.length}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  className="noc-btn px-3 py-1.5 text-sm"
+                  onClick={() => setShowAddSwitch(true)}
+                  title="Add a switch by IP or DNS (read-only SSH check)"
+                >
+                  + Add Switch
+                </button>
+              </div>
               {overviews.length === 0 && !loadingFleet ? (
-                <div className="noc-panel p-4 text-sm text-noc-muted">
-                  No switches in inventory yet. Update inventory.yaml and refresh.
+                <div className="noc-panel space-y-3 p-4 text-sm text-noc-muted">
+                  <p>No switches in inventory yet. Use + Add Switch to register one.</p>
                 </div>
               ) : (
                 overviews.map((item) => (
@@ -537,6 +574,13 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           hostname={commandsModal.hostname}
           commands={commandsModal.commands}
           onClose={() => setCommandsModal(null)}
+        />
+      )}
+
+      {showAddSwitch && (
+        <AddSwitchModal
+          onClose={() => setShowAddSwitch(false)}
+          onAdded={(result) => void handleSwitchAdded(result)}
         />
       )}
     </div>

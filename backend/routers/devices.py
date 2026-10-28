@@ -15,6 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from backend.auth.dependencies import ActiveSession, get_active_session, get_current_user
 from backend.models.schemas import (
+    AddSwitchRequest,
+    AddSwitchResponse,
     ConnectivityProbeResult,
     DeviceSummary,
     ExecCommandRequest,
@@ -25,9 +27,90 @@ from backend.models.schemas import (
 )
 from backend.services import cisco_collector
 from backend.services.audit import write_audit
-from backend.services.inventory import InventoryError, load_inventory
+from backend.services.inventory import (
+    InventoryConflictError,
+    InventoryError,
+    load_inventory,
+)
 
 router = APIRouter(prefix="/devices", tags=["devices"])
+
+
+@router.post("", response_model=AddSwitchResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=AddSwitchResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/register",
+    response_model=AddSwitchResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+async def add_switch(
+    payload: AddSwitchRequest,
+    session: ActiveSession = Depends(get_active_session),
+) -> AddSwitchResponse:
+    """Register a new switch after a read-only SSH connectivity check.
+
+    Uses the caller's login-session credentials. Runs ``show`` commands only —
+    never configuration mode. On success the switch is appended to inventory.yaml
+    and warmed into the sticky cache so the dashboard updates without a restart.
+    """
+    write_audit(
+        session.user.username,
+        "add_switch",
+        f"Register switch address={payload.address!r} hostname={payload.hostname!r}",
+    )
+    try:
+        result = await asyncio.to_thread(
+            cisco_collector.register_new_switch,
+            payload.address,
+            session.device_credentials,
+            hostname=payload.hostname,
+            platform=payload.platform,
+            site=payload.site,
+            role=payload.role,
+        )
+    except InventoryConflictError as exc:
+        write_audit(
+            session.user.username,
+            "add_switch_conflict",
+            str(exc),
+            success=False,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except InventoryError as exc:
+        write_audit(
+            session.user.username,
+            "add_switch_failed",
+            str(exc),
+            success=False,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+    except cisco_collector.CollectorError as exc:
+        write_audit(
+            session.user.username,
+            "add_switch_failed",
+            str(exc),
+            success=False,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    write_audit(
+        session.user.username,
+        "add_switch_ok",
+        result.message,
+        hostname=result.hostname,
+        success=True,
+    )
+    return result
 
 
 @router.get("", response_model=list[DeviceSummary])

@@ -14,7 +14,8 @@ services:
       AUDIT_LOG_PATH: /app/backend/audit/audit.log
       CORS_ORIGINS: http://localhost:5173,http://localhost:3000,http://localhost
     volumes:
-      - ./inventory.yaml:/app/inventory.yaml:ro
+      # Read-write so UI "Add Switch" can append inventory without a restart.
+      - ./inventory.yaml:/app/inventory.yaml:rw
       - ./baselines:/app/baselines:ro
       - ./backend/audit:/app/backend/audit
     restart: unless-stopped

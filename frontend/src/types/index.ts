@@ -110,6 +110,29 @@ export interface SwitchDetail extends SwitchOverview {
   stale_port_days_threshold?: number;
 }
 
+/** Register a new switch after a read-only SSH probe (session credentials). */
+export interface AddSwitchRequest {
+  address: string;
+  hostname?: string;
+  platform?: PlatformType;
+  site?: string;
+  role?: string;
+}
+
+export interface AddSwitchResponse {
+  hostname: string;
+  ip: string;
+  platform: PlatformType;
+  site?: string | null;
+  role?: string | null;
+  device_hostname?: string | null;
+  model?: string | null;
+  firmware?: string | null;
+  reachable: boolean;
+  overview: SwitchOverview;
+  message: string;
+}
+
 /** Live SSH probe — always uses the logged-in UI session credentials. */
 export interface ConnectivityProbeResult {
   hostname: string;
