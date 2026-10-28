@@ -1223,28 +1223,48 @@ def probe_switch_connectivity(
     collect so model, firmware, and interface counts are validated without any
     env-var secrets, then refreshes the cache with the fresh snapshot.
     """
-    cfg = settings or get_settings()
     device = _require_device(hostname)
+    return probe_inventory_item(device, device_credentials, settings=settings)
+
+
+def probe_inventory_item(
+    device: DeviceInventoryItem,
+    device_credentials: DeviceCredentials,
+    settings: Settings | None = None,
+    *,
+    seed_cache: bool = True,
+) -> ConnectivityProbeResult:
+    """
+    Live read-only probe for a concrete inventory item (may not be persisted yet).
+
+    Runs ``show`` collection only — never configuration mode. Used by Add Switch
+    before writing inventory.yaml, and by Test SSH for existing hosts.
+    """
+    cfg = settings or get_settings()
     ssh_user = _require_session_credentials(device_credentials).username
 
-    collector_cache.invalidate(device.hostname)
+    if seed_cache:
+        collector_cache.invalidate(device.hostname)
     overview, interfaces = _live_collect_overview_and_interfaces(
         device, device_credentials, cfg
     )
-    if overview.reachable:
-        detail = SwitchDetail(
-            **overview.model_dump(exclude={"ip_address"}),
-            interfaces=interfaces,
-            recommended_commands=recommended_commands_for(
-                "switch", platform=overview.platform
-            ),
-            stale_port_days_threshold=cfg.stale_port_days,
-        )
-        collector_cache.set_detail(device.hostname, detail, cfg.collector_cache_ttl_seconds)
-    else:
-        collector_cache.set_overview(
-            device.hostname, overview, cfg.collector_cache_ttl_seconds
-        )
+    if seed_cache:
+        if overview.reachable:
+            detail = SwitchDetail(
+                **overview.model_dump(exclude={"ip_address"}),
+                interfaces=interfaces,
+                recommended_commands=recommended_commands_for(
+                    "switch", platform=overview.platform
+                ),
+                stale_port_days_threshold=cfg.stale_port_days,
+            )
+            collector_cache.set_detail(
+                device.hostname, detail, cfg.collector_cache_ttl_seconds
+            )
+        else:
+            collector_cache.set_overview(
+                device.hostname, overview, cfg.collector_cache_ttl_seconds
+            )
 
     iface_count = len(interfaces) if interfaces else overview.interface_count
     up_count = (

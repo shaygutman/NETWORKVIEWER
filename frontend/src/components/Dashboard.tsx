@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { api, clearSession } from "../api/client";
 import type {
+  AddDeviceResponse,
   ConnectivityProbeResult,
   DashboardTab,
   DeviceSummary,
@@ -11,6 +12,7 @@ import type {
   TrackerSearchResponse,
   UserInfo,
 } from "../types";
+import { AddSwitchModal } from "./AddSwitchModal";
 import { CliCommandsModal } from "./CliCommandsModal";
 import { ConfigDiff } from "./ConfigDiff";
 import { MacLookup } from "./MacLookup";
@@ -43,6 +45,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     hostname: string;
     commands: string[];
   } | null>(null);
+  const [showAddSwitch, setShowAddSwitch] = useState(false);
   const [probeResult, setProbeResult] = useState<ConnectivityProbeResult | null>(null);
   const [probing, setProbing] = useState(false);
 
@@ -205,6 +208,20 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     onLogout();
   }
 
+  async function handleSwitchAdded(result: AddDeviceResponse) {
+    setShowAddSwitch(false);
+    setError(null);
+    setSelectedHost(result.device.hostname);
+    setTab("switches");
+    await refreshFleet(false);
+    try {
+      const data = await api.deviceDetail(result.device.hostname, false);
+      setDetail(data);
+    } catch {
+      /* overview card still shows from cache seeded during add */
+    }
+  }
+
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-20 border-b border-noc-border/80 bg-slate-950/80 backdrop-blur">
@@ -258,6 +275,13 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
               title="Live SSH collect for all switches (slow — updates cache in background)"
             >
               Live collect
+            </button>
+            <button
+              className="noc-btn"
+              onClick={() => setShowAddSwitch(true)}
+              title="Add a switch by IP or DNS after a read-only SSH check"
+            >
+              Add Switch
             </button>
             <span className="rounded-lg border border-noc-border px-3 py-2 text-xs text-slate-300">
               {user.display_name || user.username}
@@ -537,6 +561,13 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           hostname={commandsModal.hostname}
           commands={commandsModal.commands}
           onClose={() => setCommandsModal(null)}
+        />
+      )}
+
+      {showAddSwitch && (
+        <AddSwitchModal
+          onClose={() => setShowAddSwitch(false)}
+          onAdded={(result) => void handleSwitchAdded(result)}
         />
       )}
     </div>

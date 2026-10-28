@@ -29,6 +29,20 @@ export interface DeviceSummary {
   last_error?: string | null;
 }
 
+export interface AddDeviceRequest {
+  target: string;
+  platform?: PlatformType;
+  site?: string | null;
+  role?: string | null;
+  inventory_hostname?: string | null;
+}
+
+export interface AddDeviceResponse {
+  device: DeviceSummary;
+  probe: ConnectivityProbeResult;
+  message: string;
+}
+
 export interface PortDetail {
   port: string;
   status: PortStatus;

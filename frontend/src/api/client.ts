@@ -1,4 +1,6 @@
 import type {
+  AddDeviceRequest,
+  AddDeviceResponse,
   AuthToken,
   BaselineDiffResponse,
   ConnectivityProbeResult,
@@ -109,6 +111,13 @@ export const api = {
   },
   listDevices() {
     return request<DeviceSummary[]>("/api/devices");
+  },
+  /** Register a switch after a read-only SSH check (session credentials only). */
+  addDevice(body: AddDeviceRequest) {
+    return request<AddDeviceResponse>("/api/devices", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
   },
   /** Fleet overview. Default = local cache only (no SSH). refresh=true = on-demand live collect. */
   overview(refresh = false) {

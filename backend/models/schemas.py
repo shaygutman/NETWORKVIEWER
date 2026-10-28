@@ -79,6 +79,48 @@ class DeviceSummary(BaseModel):
         return self.ip
 
 
+class AddDeviceRequest(BaseModel):
+    """Register a switch into inventory after a read-only SSH reachability check."""
+
+    target: str = Field(
+        min_length=1,
+        max_length=253,
+        description="IPv4/IPv6 address or DNS hostname of the switch",
+    )
+    platform: PlatformType = PlatformType.CISCO_IOS
+    site: str | None = Field(default=None, max_length=64)
+    role: str | None = Field(default=None, max_length=64)
+    inventory_hostname: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Optional inventory id; defaults from IP or DNS name",
+    )
+
+    @field_validator("target")
+    @classmethod
+    def normalize_target(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Switch hostname or IP is required")
+        return cleaned
+
+    @field_validator("inventory_hostname")
+    @classmethod
+    def normalize_inventory_hostname(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @field_validator("site", "role")
+    @classmethod
+    def normalize_optional_label(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+
 class InterfaceStatus(BaseModel):
     port: str
     status: PortOperationalStatus
@@ -309,6 +351,14 @@ class ConnectivityProbeResult(BaseModel):
     interfaces_down: int = 0
     error: str | None = None
     collected_at: datetime | None = None
+
+
+class AddDeviceResponse(BaseModel):
+    """Result of registering a switch after a read-only connectivity probe."""
+
+    device: DeviceSummary
+    probe: ConnectivityProbeResult
+    message: str
 
 
 class TrackerSearchRequest(BaseModel):

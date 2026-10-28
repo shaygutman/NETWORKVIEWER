@@ -15,7 +15,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from backend.auth.dependencies import ActiveSession, get_active_session, get_current_user
 from backend.models.schemas import (
+    AddDeviceRequest,
+    AddDeviceResponse,
     ConnectivityProbeResult,
+    DeviceInventoryItem,
     DeviceSummary,
     ExecCommandRequest,
     ExecCommandResponse,
@@ -25,7 +28,14 @@ from backend.models.schemas import (
 )
 from backend.services import cisco_collector
 from backend.services.audit import write_audit
-from backend.services.inventory import InventoryError, load_inventory
+from backend.services.collector_cache import collector_cache
+from backend.services.inventory import (
+    InventoryConflictError,
+    InventoryError,
+    add_device,
+    load_inventory,
+    resolve_switch_target,
+)
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -48,6 +58,129 @@ async def list_devices(
         )
         for d in devices
     ]
+
+
+@router.post("", response_model=AddDeviceResponse, status_code=status.HTTP_201_CREATED)
+async def register_device(
+    body: AddDeviceRequest,
+    session: ActiveSession = Depends(get_active_session),
+) -> AddDeviceResponse:
+    """
+    Add a switch to inventory after a read-only SSH connectivity check.
+
+    Uses the caller's login-session credentials only. Runs ``show`` collection
+    to validate reachability, then persists the device so background polling and
+    global search include it immediately (no process restart).
+    """
+    try:
+        hostname, ip = resolve_switch_target(
+            body.target,
+            inventory_hostname=body.inventory_hostname,
+        )
+    except InventoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    candidate = DeviceInventoryItem(
+        hostname=hostname,
+        ip=ip,
+        platform=body.platform,
+        credential_group="session",
+        site=body.site,
+        role=body.role,
+        enabled=True,
+    )
+
+    write_audit(
+        session.user.username,
+        "add_device_probe",
+        f"Read-only connectivity probe before adding {hostname} ({ip})",
+        hostname=hostname,
+    )
+
+    try:
+        probe = await asyncio.to_thread(
+            lambda: cisco_collector.probe_inventory_item(
+                candidate,
+                session.device_credentials,
+                seed_cache=True,
+            )
+        )
+    except cisco_collector.CollectorError as exc:
+        write_audit(
+            session.user.username,
+            "add_device_failed",
+            f"Probe failed for {hostname} ({ip}): {exc}",
+            hostname=hostname,
+            success=False,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    if not probe.reachable:
+        # Do not leave a phantom cache entry for a switch we refuse to register.
+        await asyncio.to_thread(collector_cache.invalidate, hostname)
+        write_audit(
+            session.user.username,
+            "add_device_failed",
+            f"Switch unreachable during add: {hostname} ({ip}) — {probe.error or 'unknown'}",
+            hostname=hostname,
+            success=False,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                probe.error
+                or "Read-only SSH check failed. Confirm IP/DNS, AAA access, and that "
+                "the switch accepts your login credentials."
+            ),
+        )
+
+    # Prefer auto-detected platform from show version when it differs.
+    if probe.platform != candidate.platform:
+        candidate = candidate.model_copy(update={"platform": probe.platform})
+
+    try:
+        saved = await asyncio.to_thread(add_device, candidate)
+    except InventoryConflictError as exc:
+        await asyncio.to_thread(collector_cache.invalidate, hostname)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except InventoryError as exc:
+        await asyncio.to_thread(collector_cache.invalidate, hostname)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
+
+    write_audit(
+        session.user.username,
+        "add_device",
+        f"Added {saved.hostname} ({saved.ip}, {saved.platform.value}) to inventory",
+        hostname=saved.hostname,
+    )
+
+    return AddDeviceResponse(
+        device=DeviceSummary(
+            hostname=saved.hostname,
+            ip=saved.ip,
+            platform=saved.platform,
+            site=saved.site,
+            role=saved.role,
+            reachable=True,
+        ),
+        probe=probe,
+        message=(
+            f"Added {saved.hostname} ({saved.ip}). "
+            "It is now in the monitoring pool and local cache."
+        ),
+    )
 
 
 @router.get("/overview", response_model=list[SwitchOverview])
