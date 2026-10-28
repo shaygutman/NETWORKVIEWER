@@ -64,11 +64,17 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   if (!response.ok) {
     let detail = `Request failed (${response.status})`;
+    const raw = await response.text();
     try {
-      const body = (await response.json()) as { detail?: string };
-      if (body.detail) detail = body.detail;
+      const body = JSON.parse(raw) as { detail?: string | unknown };
+      if (typeof body.detail === "string" && body.detail) {
+        detail = body.detail;
+      }
     } catch {
-      /* ignore parse errors */
+      if (/Request Header Or Cookie Too Large/i.test(raw)) {
+        detail =
+          "Session token too large for the web proxy. Sign out, then sign in again after the server update.";
+      }
     }
     throw new ApiError(detail, response.status);
   }

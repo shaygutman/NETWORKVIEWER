@@ -235,12 +235,31 @@ def _assert_group_membership(attributes: dict[str, Any], cfg: Settings) -> None:
         raise AuthenticationError("User is not a member of the authorized ENT group")
 
 
+def _short_group_names(member_of: list[str], *, limit: int = 32) -> list[str]:
+    """Return compact group CNs — never full AD DNs (those blow up JWT/header size)."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for dn in member_of:
+        head = dn.split(",", 1)[0]
+        name = head[3:] if head.upper().startswith("CN=") else dn
+        name = name.strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        names.append(name)
+        if len(names) >= limit:
+            break
+    return names
+
+
 def _user_info_from_attributes(username: str, attributes: dict[str, Any]) -> UserInfo:
     return UserInfo(
         username=attributes.get("sAMAccountName") or bare_sam_account(username),
         display_name=attributes.get("displayName") or attributes.get("cn"),
         email=attributes.get("mail"),
-        groups=list(attributes.get("memberOf") or []),
+        # Short CNs only — embedding full memberOf DNs in JWT makes nginx return 400
+        # ("Request Header Or Cookie Too Large") on every authenticated API call.
+        groups=_short_group_names(list(attributes.get("memberOf") or [])),
         auth_mode="ldap",
     )
 

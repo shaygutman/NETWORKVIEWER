@@ -46,13 +46,15 @@ async def login(payload: LoginRequest) -> AuthToken:
         ) from exc
 
     session_id = str(uuid.uuid4())
+    # Keep JWT small: full LDAP memberOf lists make Authorization headers exceed
+    # nginx defaults and surface as UI "Request failed (400)".
     token, expires_in, expires_at = create_access_token(
         subject=user.username,
         extra_claims={
             "sid": session_id,
             "display_name": user.display_name,
             "email": user.email,
-            "groups": user.groups,
+            "groups": user.groups[:8],
             "auth_mode": user.auth_mode,
         },
         settings=settings,
