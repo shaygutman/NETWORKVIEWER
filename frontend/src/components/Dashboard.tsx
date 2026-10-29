@@ -15,6 +15,7 @@ import type {
 import { AddSwitchModal } from "./AddSwitchModal";
 import { CliCommandsModal } from "./CliCommandsModal";
 import { ConfigDiff } from "./ConfigDiff";
+import { IndexMapModal } from "./IndexMapModal";
 import { MacLookup } from "./MacLookup";
 import { PortTable } from "./PortTable";
 import { SearchCoverageBanner } from "./SearchCoverageBanner";
@@ -46,6 +47,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     commands: string[];
   } | null>(null);
   const [showAddSwitch, setShowAddSwitch] = useState(false);
+  const [showIndexMap, setShowIndexMap] = useState(false);
   const [probeResult, setProbeResult] = useState<ConnectivityProbeResult | null>(null);
   const [probing, setProbing] = useState(false);
 
@@ -282,6 +284,13 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
               title="Add a switch by IP or DNS after a read-only SSH check"
             >
               Add Switch
+            </button>
+            <button
+              className="noc-btn-ghost"
+              onClick={() => setShowIndexMap(true)}
+              title="Documentation device index (page 4) — display only"
+            >
+              Index Map
             </button>
             <span className="rounded-lg border border-noc-border px-3 py-2 text-xs text-slate-300">
               {user.display_name || user.username}
@@ -570,6 +579,8 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           onAdded={(result) => void handleSwitchAdded(result)}
         />
       )}
+
+      {showIndexMap && <IndexMapModal onClose={() => setShowIndexMap(false)} />}
     </div>
   );
 }
